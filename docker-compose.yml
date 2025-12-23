@@ -1,5 +1,5 @@
 services:
-  ispras-llm-ui:
+  ispras-llm-stand:
     build: .
     ports:
       - "8000:8000"
