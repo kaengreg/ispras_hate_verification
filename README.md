@@ -24,22 +24,24 @@ cd ispras_hate_verification
 pip install -r requirements.txt
 ```
 
-Make sure you have Python 3.8+ installed on your system.
+Make sure you have Python 3.11+ installed on your system.
 
 ## Usage
 Run the FastAPI and Gradio-based LLM Stand using the following command:
 ```bash
-python main.py
+uvicorn main:app --reload --host 0.0.0.0 --port 8000  
 ```
+Alternatively, launch it using Docker (requires VLLM_BASE_URL and VLLM_API_KEY to be set in the .env file):
+```bash
+./run_stand.sh
+```
+
 This will start the FastAPI server and launch the Gradio interface for user interaction.
 
 ### Access the Interface
 Once the server is running, you can:
-- Access the FastAPI docs at: `http://127.0.0.1:8000/docs`
-- Open the Gradio interface to analyze the text.
-
-## Contributing
-Contributions are welcome! Feel free to create issues or submit pull requests for any feature requests, bug fixes, or enhancements.
+- Open the Gradio interface at `http://localhost:8000` to analyze the text.
+- Access the FastAPI docs at: `http://localhost:8000/docs`
 
 ## License
 This project is licensed under the [MIT License](LICENSE).
