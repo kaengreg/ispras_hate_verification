@@ -18,7 +18,7 @@ app = FastAPI(title="LLM Ispras")
 class RunRequest(BaseModel):
     model: str = Field(...)
     text: str = Field(..., min_length=1)
-    criteria: Optional[List[str]] = Field(...)
+    criteria: Optional[List[str]] = Field(default=None)
 
 class CriterionResult(BaseModel):
     task_name: str
@@ -228,7 +228,7 @@ async def get_models():
         raise HTTPException(status_code=502, detail=response.text)
     
     data = response.json()
-    models =  [{"id": model["id"], "status": model["status"]} for model in data.get("data", []) if "id" in model]
+    models = [{"id": m.get("id"), "status": m.get("status")} for m in data.get("data", []) if m.get("id") is not None]
     return {"models": models}
 
 async def chat(model: str, messages: List[Dict[str, str]], temperature: float = 0.2) -> str:
@@ -260,11 +260,6 @@ def parse_model_reply(raw: str) -> Dict[str, Any]:
         s = re.sub(r"\s*```$", "", s)
         s = s.strip()
 
-    s = s.translate(str.maketrans({
-        "“": '"', "”": '"',
-        "«": '"', "»": '"',
-        "’": "'", "‘": "'",
-    }))
 
     try:
         obj = json.loads(s)
@@ -273,10 +268,29 @@ def parse_model_reply(raw: str) -> Dict[str, Any]:
     except Exception:
         pass
 
-    lb = s.find("{")
-    rb = s.rfind("}")
+    s_norm = s.translate(
+        str.maketrans(
+            {
+                "“": '"',
+                "”": '"',
+                "’": "'",
+                "‘": "'",
+            }
+        )
+    )
+
+    try:
+        obj = json.loads(s_norm)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+
+    text_for_scan = s_norm
+    lb = text_for_scan.find("{")
+    rb = text_for_scan.rfind("}")
     if lb != -1 and rb != -1 and rb > lb:
-        candidate = s[lb:rb + 1].strip()
+        candidate = text_for_scan[lb:rb + 1].strip()
         try:
             obj = json.loads(candidate)
             if isinstance(obj, dict):
