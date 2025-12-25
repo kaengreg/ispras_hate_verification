@@ -1,10 +1,14 @@
 import gradio as gr
 import httpx
 from gradio import Request
+import os
+
+def get_api_base(req: Request) -> str:
+    return os.getenv("API_BASE_URL") or str(req.request.base_url).rstrip("/")
 
 
 def fetch_models(req: Request):
-    base = str(req.request.base_url).rstrip("/")
+    base = get_api_base(req)
     response = httpx.get(f"{base}/models", timeout=20)
     response.raise_for_status()
 
@@ -19,7 +23,7 @@ def fetch_models(req: Request):
 
 
 def fetch_criteria(req: Request):
-    base = str(req.request.base_url).rstrip("/")
+    base = get_api_base(req)
     response = httpx.get(f"{base}/criteria", timeout=20)
     response.raise_for_status()
 
@@ -34,7 +38,7 @@ def run_pipeline(model, criteria_keys, text, req: Request):
 
     yield gr.update(value="&nbsp;\n\n⏳ **Обработка...**\n\nПожалуйста, подождите — выполняется проверка по выбранным критериям.", visible=True)
 
-    base = str(req.request.base_url).rstrip("/")
+    base = get_api_base(req)
     req_body = {"model": model, "text": text, "criteria": criteria_keys}
 
     try:

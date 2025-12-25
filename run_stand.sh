@@ -57,4 +57,4 @@ fi
 
 docker compose up -d --build
 
-echo "OK. Open: http://localhost:8000"
+echo "OK. Open: http://localhost:${HOST_PORT:-8000}"
