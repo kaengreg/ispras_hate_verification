@@ -126,10 +126,16 @@ with gr.Blocks() as demo:
 
     def on_load(req: Request):
         model_choices = fetch_models(req)
-        default_model = model_choices[0][1] if model_choices else None
+
+        preferred = "Qwen3-235B-A22B-Instruct-2507"
+        available_ids = [val for (_, val) in model_choices]
+        if preferred in available_ids:
+            default_model = preferred
+        else:
+            default_model = model_choices[0][1] if model_choices else None
 
         criteria_choices = fetch_criteria(req)
-        default_criteria = [val for (_lbl, val) in criteria_choices]
+        default_criteria = [val for (_, val) in criteria_choices]
 
         return (
             gr.update(choices=model_choices, value=default_model),
