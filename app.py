@@ -7,6 +7,11 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from prompts import CRITERION_V2, SYSTEM_PROMPT
+
+from dotenv import load_dotenv
+load_dotenv(override=False)
+
 BASE_URL = os.getenv("VLLM_BASE_URL", "http://127.0.0.1:6266")
 API_KEY = os.getenv("VLLM_API_KEY", "")
 TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "60"))
@@ -19,193 +24,20 @@ class RunRequest(BaseModel):
     model: str = Field(...)
     text: str = Field(..., min_length=1)
     criteria: Optional[List[str]] = Field(default=None)
+    max_retries: int = Field(default=1, ge=0, le=2)
 
 class CriterionResult(BaseModel):
     task_name: str
     verdict: str  # "pass" | "fail"
+    tonality: str # "POS" | "NEU" | "NEG"
     reason: str
     raw: str
+    raw_repr: str
 
 class RunResponse(BaseModel):
     model: str
     results: Dict[str, CriterionResult]
 
-
-"""CRITERION_v1 = {
-    "anti_russia": {
-        "title": "Антироссийские высказывания",
-        "instruction": (
-            "Определи, содержит ли текст антироссийские высказывания: унижение России/россиян, "
-            "призывы к дискриминации/вражде, дегуманизация. Обычная критика политики/событий без ненависти "
-            "или призывов сама по себе не считается нарушением."
-        ),
-    },
-    "obscene language": {
-        "title": "Контроль мата",
-        "instruction": "Определи, есть ли в тексте нецензурная лексика/мат, включая завуалированный мат (звёздочки, пропуски букв).",
-    },
-    "hate_speech": {
-        "title": "Ненависть к народам, религиям, странам и социальным слоям",
-        "instruction": (
-            "Определи, есть ли в тексте высказывания ненависти/вражды к группам людей по национальным или "
-            "религиозным признакам, по признаку страны происхождения или социального слоя, включая дегуманизацию и призывы к насилию/дискриминации."
-        ),
-    },
-    "toxicity": {
-        "title": "Токсичность по отношению к конкретному человеку",
-        "instruction": (
-            "Определи, есть ли в тексте персональные оскорбления, унижения, травля или токсичность, "
-            "направленные на конкретного человека (по имени/явному адресату)."
-        ),
-    },
-    "crime_approval": {
-        "title": "Одобрение правонарушений и преступлений",
-        "instruction": "Определи, содержит ли текст одобрение/поощрение преступлений или призывы совершать правонарушения.",
-    },
-    "drugs_instructions": {
-        "title": "Рекомендации по запрещенным веществам",
-        "instruction": (
-            "Определи, содержит ли текст инструкции, рецепты, советы по изготовлению, употреблению, покупке, "
-            "распространению запрещённых веществ либо советы по обходу проверок/законов."
-        ),
-    },
-    "weapons_explosives": {
-        "title": "Рекомендации по оружию, взрывчатым и опасным веществам",
-        "instruction": (
-            "Определи, содержит ли текст инструкции, рецепты или советы по изготовлению/модификации/применению оружия, "
-            "взрывчатых или иных опасных веществ/устройств."
-        ),
-    },
-    "cultural_historical": {
-        "title": "Контроль культурных и исторических норм",
-        "instruction": (
-            "Определи, содержит ли текст явные оскорбления культурных/исторических символов и традиций, "
-            "надругательство над памятными датами, либо провокационное унижение исторической памяти."
-        ),
-    },
-}"""
-
-CRITERION_V2 = {
-    "anti_russia": {
-        "title": "Антироссийские высказывания",
-        "instruction": (
-            "Определи, содержит ли текст антироссийские высказывания."
-
-            "Считается нарушением:"
-            "— унижение России или россиян как группы;"
-            "— обесчеловечивание россиян;"
-            "— призывы к дискриминации, вражде или насилию в отношении россиян;"
-            " — обобщающие негативные утверждения о россиянах как о народе."
-
-            "Не считается нарушением:"
-            "— критика политики, власти, государственных решений без ненависти;"
-            "— обсуждение санкций и международных отношений без ненависти;"
-
-            "Оценивай только явное содержание текста, без домыслов о намерениях автора."
-            "Если нарушение не выражено явно — выбирай отсутствие нарушения."
-        ),
-    },
-    "obscene language": {
-        "title": "Контроль мата",
-        "instruction": ("Определи, содержит ли текст нецензурную лексику (мат)."
-
-                        "Считается нарушением:"
-                        "— прямое использование нецензурной лексики;"
-                        "— завуалированный мат (звёздочки, пропуски букв, фонетические замены);"
-                        "— устойчивые матерные выражения и ругательства."
-
-                        "Не считается нарушением:"
-                        "— разговорные грубости без мата;"
-                        "— упоминание мата в описательном, учебном или аналитическом контексте."
-
-                        "Учитывай язык текста и распространённые способы маскировки мата."),
-    },
-    "hate_speech": {
-        "title": "Ненависть к народам, религиям, странам и социальным слоям",
-        "instruction": (
-            "Определи, содержит ли текст высказывания ненависти или вражды к группам людей."
-
-            "Считается нарушением:"
-            "— негативные или враждебные обобщения по признаку национальности, религии,"
-            "страны происхождения или социального слоя;"
-            "— обесчеловечивание групп людей;"
-            "— призывы к насилию, дискриминации или исключению."
-
-            "Если объектом является группа людей, используй этот критерий, а не персональную токсичность."
-        ),
-    },
-    "toxicity": {
-        "title": "Токсичность по отношению к конкретному человеку",
-        "instruction": (
-            "Определи, содержит ли текст токсичность, направленную на конкретного человека."
-
-            "Считается нарушением:"
-            "— персональные оскорбления, унижения или насмешки;"
-            "— агрессивные или враждебные высказывания в адрес конкретного лица;"
-            "— травля или систематическое унижение личности."
-
-            "Не считается нарушением:"
-            "— резкая, но аргументированная критика действий, решений или взглядов;"
-            "— эмоциональные высказывания без конкретного адресата."
-        ),
-    },
-    "crime_approval": {
-        "title": "Одобрение правонарушений и преступлений",
-        "instruction": ("Определи, содержит ли текст одобрение или поощрение правонарушений."
-
-                        "Считается нарушением:"
-                        "— прямое одобрение преступлений или насилия;"
-                        "— призывы к совершению незаконных действий;"
-                        "— оправдание краж, мошенничества, насилия и других правонарушений."
-
-                        "Не считается нарушением:"
-                        "— описание преступлений в новостном, художественном контексте;"
-                        "— обсуждение последствий, наказаний или профилактики преступлений."),
-    },
-    "drugs_instructions": {
-        "title": "Рекомендации по запрещенным веществам",
-        "instruction": (
-            "Определи, содержит ли текст инструкции или советы, связанные с запрещенными веществами."
-
-            "Считается нарушением:"
-            "— инструкции по изготовлению, употреблению, покупке или распространению;"
-            "— советы по сокрытию, обходу проверок или нарушению законов."
-
-            "Не считается нарушением:"
-            "— медицинское, научное или общественно-профилактическое описание;"
-            "— обсуждение вреда, зависимости и последствий употребления без практических рекомендаций."
-        ),
-    },
-    "weapons_explosives": {
-        "title": "Рекомендации по оружию, взрывчатым и опасным веществам",
-        "instruction": (
-            "Определи, содержит ли текст инструкции или советы по оружию или взрывчатым веществам."
-
-            "Считается нарушением:"
-            "— инструкции по изготовлению, модификации или применению оружия;"
-            "— советы по созданию или использованию взрывчатых и других опасных устройств."
-
-            "Не считается нарушением:"
-            "— историческое, новостное или учебное описание;"
-            "— обсуждение законодательства, контроля и мер безопасности без инструктивных деталей."
-        ),
-    },
-    "cultural_historical": {
-        "title": "Контроль культурных и исторических норм",
-        "instruction": (
-            "Определи, содержит ли текст оскорбления культурных или исторических ценностей."
-
-            "Считается нарушением:"
-            "— явные оскорбления или надругательство над культурными, религиозными"
-            "или историческими символами;"
-            "— провокационное унижение исторической памяти или памятных дат."
-
-            "Не считается нарушением:"
-            "— критическое, научное или публицистическое обсуждение истории и культуры;"
-            "— выражение личного мнения без оскорбительного или уничижительного языка."
-        ),
-    },
-}
 
 CRITERION = CRITERION_V2
 
@@ -254,12 +86,67 @@ def parse_model_reply(raw: str) -> Dict[str, Any]:
     if raw is None:
         raise ValueError("Empty model reply")
 
-    s = str(raw).strip()
-    if s.startswith("```"):
-        s = re.sub(r"^```(?:json)?\s*", "", s, flags=re.IGNORECASE)
-        s = re.sub(r"\s*```$", "", s)
-        s = s.strip()
+    def normalize_quotes(s: str) -> str:
+        return s.translate(
+            str.maketrans(
+                {
+                    "“": '"', "”": '"',
+                    "«": '"', "»": '"',
+                    "‟": '"', "„": '"',
+                    "’": "'", "‘": "'", "‚": "'",
+                }
+            )
+        )
 
+    def strip_code_fences(s: str) -> str:
+        s = s.strip()
+        if s.startswith("```"):
+            s = re.sub(r"^```(?:json)?\s*", "", s, flags=re.IGNORECASE)
+            s = re.sub(r"\s*```\s*$", "", s)
+        return s.strip()
+
+    def extract_json_object(s: str) -> str | None:
+        lb = s.find("{")
+        rb = s.rfind("}")
+        if lb != -1 and rb != -1 and rb > lb:
+            return s[lb:rb + 1].strip()
+        return None
+
+    def newlines_in_strings(s: str) -> str:
+        res = []
+        in_str = False
+        esc = False
+        for ch in s:
+            if in_str:
+                if esc:
+                    res.append(ch)
+                    esc = False
+                    continue
+                if ch == "\\":
+                    res.append(ch)
+                    esc = True
+                    continue
+                if ch == '"':
+                    res.append(ch)
+                    in_str = False
+                    continue
+                if ch == "\n":
+                    res.append("\\n")
+                    continue
+                if ch == "\r":
+                    res.append("\\r")
+                    continue
+                res.append(ch)
+            else:
+                res.append(ch)
+                if ch == '"':
+                    in_str = True
+                    esc = False
+        return "".join(res)
+
+    s = str(raw)
+    s = strip_code_fences(s)
+    s = normalize_quotes(s)
 
     try:
         obj = json.loads(s)
@@ -268,60 +155,46 @@ def parse_model_reply(raw: str) -> Dict[str, Any]:
     except Exception:
         pass
 
-    s_norm = s.translate(
-        str.maketrans(
-            {
-                "“": '"',
-                "”": '"',
-                "’": "'",
-                "‘": "'",
-            }
-        )
-    )
-
-    try:
-        obj = json.loads(s_norm)
-        if isinstance(obj, dict):
-            return obj
-    except Exception:
-        pass
-
-    text_for_scan = s_norm
-    lb = text_for_scan.find("{")
-    rb = text_for_scan.rfind("}")
-    if lb != -1 and rb != -1 and rb > lb:
-        candidate = text_for_scan[lb:rb + 1].strip()
+    candidate = extract_json_object(s)
+    if candidate:
+        cand = newlines_in_strings(candidate)
         try:
-            obj = json.loads(candidate)
+            obj = json.loads(cand)
             if isinstance(obj, dict):
                 return obj
         except Exception:
-            try:
-                obj = ast.literal_eval(candidate)
-                if isinstance(obj, dict):
-                    return obj
-            except Exception:
-                pass
+            pass
 
     raise ValueError("Unable to parse model reply as JSON")
 
-def build_messages(title: str, instruction: str, user_text: str) -> List[Dict[str, str]]:
-    system = (
-        "Ты виртуальный ассистент для модерации текстов. Твоя задача — проверять текст по заданному критерию и выдавать однозначный вердикт.\n"
-        "Отвечай строго в JSON без markdown и без лишних ключей.\n"
-        "Ключи JSON: verdict, reason. Никаких других ключей.\n"
-        "verdict может быть только: \"pass\" или \"fail\" (строго в нижнем регистре).\n"
-        "Правило вынесения вердиктов: если по данному критерию в тексте ЕСТЬ нарушение — verdict=\"fail\". Если нарушения НЕТ — verdict=\"pass\".\n"
-        "Если есть сомнение или недостаточно данных — выбирай verdict=\"pass\".\n"
-        "Не цитируй мат/оскорбления/ненавистнические фразы дословно; при необходимости используй маскировку (например, ***)."
-    )
+def build_messages(title: str, instruction: str, user_text: str, few_shot) -> List[Dict[str, str]]:
+    system = SYSTEM_PROMPT 
+    
+    examples_block = ""
+    if few_shot:
+        order = ["POS", "NEU", "NEG"]
+        idx = 1
+        lines = []
+        lines.append("**Примеры:**\n")
+        for ton in order:
+            for example in few_shot.get(ton, []):
+                example_text = str(example['text'].strip())
+                example_verdict = str(example['expected_verdict'].strip().lower())
+                example_reason = "Нарушений по критерию нет."
+                lines.append(f"Текст: {example_text}")
+                lines.append(f"Ответ: {{\"verdict\": \"{example_verdict}\", \"tonality\": \"{ton}\", \"reason\": \"{example_reason}\"}}")
+        
+        examples_block = '\n'.join(lines) + "\n\n"
+ 
+                             
     user = (
         f"Критерий: {title}\n"
         f"Инструкция: {instruction}\n\n"
         "Твоя задача: определить, есть ли в тексте нарушение по этому критерию.\n"
-        "Верни строго JSON формата: {\"verdict\":\"pass\"|\"fail\",\"reason\":\"коротко почему (1-3 предложения)\"}.\n"
+        "Верни строго JSON: {\"verdict\":\"pass\"|\"fail\",\"tonality\":\"POS\"|\"NEG\"|\"NEU\",\"reason\":\"коротко почему (1-3 предложения)\"}.\n"
         "Важно: если нарушение есть — обязательно \"fail\". Если нарушения нет — обязательно \"pass\".\n\n"
-        f"Текст:\n{user_text}"
+        + examples_block + 
+        f"**Текст для анализа:**\n\n{user_text}"
     )
     return [
         {"role": "system", "content": system},
@@ -345,24 +218,47 @@ async def run(request: RunRequest):
 
     for key in keys_to_run:
         cfg = CRITERION[key]
-        raw = await chat(
-            model=request.model,
-            messages=build_messages(cfg["title"], cfg["instruction"], request.text),
-            temperature=0.2,
-        )
+        last_raw = ""
+        last_err: Optional[Exception] = None
 
-        try:
-            parsed = parse_model_reply(raw)
-            verdict = str(parsed.get("verdict", "pass")).strip().lower()
-            verdict = verdict if verdict in {"pass", "fail"} else "pass"
-            reason = str(parsed.get("reason", "")).strip()
-            results[key] = CriterionResult(task_name=cfg["title"], verdict=verdict, reason=reason, raw=raw)
-        except Exception:
+        for attempt in range(request.max_retries + 1):
+            raw = await chat(
+                model=request.model,
+                messages=build_messages(cfg["title"], cfg["instruction"], request.text, cfg["few_shot"]),
+                temperature=0.2 if attempt == 0 else 0.0,
+            )
+            print(build_messages(cfg["title"], cfg["instruction"], request.text, cfg["few_shot"]))
+            last_raw = raw
+
+            try:
+                parsed = parse_model_reply(raw)
+                verdict = str(parsed.get("verdict", "pass")).strip().lower()
+                verdict = verdict if verdict in {"pass", "fail"} else "pass"
+                reason = str(parsed.get("reason", "")).strip()
+                tonality = str(parsed.get("tonality", "NEU").strip().upper())
+
+                results[key] = CriterionResult(
+                    task_name=cfg["title"],
+                    verdict=verdict,
+                    tonality=tonality,
+                    reason=reason,
+                    raw=last_raw,
+                    raw_repr=repr(last_raw),
+                )
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+
+        # If still not parsed after retries
+        if last_err is not None and key not in results:
             results[key] = CriterionResult(
                 task_name=cfg["title"],
                 verdict="fail",
-                reason="Не удалось разобрать ответ модели как JSON.",
-                raw=raw,
+                tonality='UNDEFINED',
+                reason=f"Не удалось разобрать ответ модели как JSON после {request.max_retries + 1} попыток.",
+                raw=last_raw,
+                raw_repr=repr(last_raw),
             )
 
     return RunResponse(model=request.model, results=results)
