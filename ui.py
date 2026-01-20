@@ -80,6 +80,7 @@ def run_pipeline(model, criteria_keys, text, req: Request):
         )
         reason = str(ans.get("reason", ""))
         raw = str(ans.get("raw", ""))
+        raw_repr = str(ans.get("raw_repr", ""))
 
         task_name_tbl = task_name.replace("|", "\\|")
         table_lines.append(f"| {task_name_tbl} | {verdict_icon} |")
@@ -90,7 +91,8 @@ def run_pipeline(model, criteria_keys, text, req: Request):
             f"**Вердикт:** {verdict_text} {verdict_icon}\n\n"
             f"**Обоснование:** {reason_md}\n\n"
             f"<details>\n<summary><b>Полный ответ модели</b></summary>\n\n"
-            f"<pre>{raw}</pre>\n"
+            f"<div><b>raw</b></div>\n<pre>{raw}</pre>\n\n"
+            f"<div><b>repr(raw)</b></div>\n<pre>{raw_repr}</pre>\n"
             f"</details>\n"
         )
 
