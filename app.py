@@ -7,7 +7,7 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from prompts import CRITERION_V2, SYSTEM_PROMPT
+from prompts import CRITERION_V3
 
 from dotenv import load_dotenv
 load_dotenv(override=False)
@@ -28,8 +28,7 @@ class RunRequest(BaseModel):
 
 class CriterionResult(BaseModel):
     task_name: str
-    verdict: str  # "pass" | "fail"
-    tonality: str # "POS" | "NEU" | "NEG"
+    verdict: str  # "pass" | "fail" or "ANTI"|"PRO"|"NEU" depends on the criteria 
     reason: str
     raw: str
     raw_repr: str
@@ -39,7 +38,7 @@ class RunResponse(BaseModel):
     results: Dict[str, CriterionResult]
 
 
-CRITERION = CRITERION_V2
+CRITERION = CRITERION_V3
 
 
 @app.get("/criteria")
@@ -51,7 +50,9 @@ async def get_criteria():
 @app.get("/models")
 async def get_models():
     url = f"{BASE_URL}/v1/models"
-    headers = {"Authorization": f"Bearer {API_KEY}"}
+    headers = {"Content-Type": "application/json"}
+    if API_KEY:
+        headers["Authorization"] = f"Bearer {API_KEY}"
 
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         response = await client.get(url, headers=headers)
@@ -65,7 +66,9 @@ async def get_models():
 
 async def chat(model: str, messages: List[Dict[str, str]], temperature: float = 0.2) -> str:
     url = f"{BASE_URL}/v1/chat/completions"
-    headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json"}
+    if API_KEY:
+        headers["Authorization"] = f"Bearer {API_KEY}"
 
     req_body = {"model": model, "messages": messages, "temperature": temperature}
 
@@ -167,32 +170,34 @@ def parse_model_reply(raw: str) -> Dict[str, Any]:
 
     raise ValueError("Unable to parse model reply as JSON")
 
-def build_messages(title: str, instruction: str, user_text: str, few_shot) -> List[Dict[str, str]]:
-    system = SYSTEM_PROMPT 
+def build_messages(cfg: Dict[str, Any], user_text: str) -> List[Dict[str, str]]:
+    system = cfg.get('system_prompt').strip()
+    if not system:
+        raise ValueError("Criterion config is missing non-empty 'system_prompt'")
     
+    title = cfg.get('title').strip()
+    instruction = cfg.get('instruction').strip()
+    few_shot = cfg.get('few_shot')
+
+
     examples_block = ""
-    if few_shot:
-        order = ["POS", "NEU", "NEG"]
-        idx = 1
+    if few_shot and isinstance(few_shot, dict):
+        verdict_options = few_shot.keys()
         lines = []
         lines.append("**Примеры:**\n")
-        for ton in order:
-            for example in few_shot.get(ton, []):
-                example_text = str(example['text'].strip())
-                example_verdict = str(example['expected_verdict'].strip().lower())
-                example_reason = "Нарушений по критерию нет."
+        for opt in verdict_options:
+            for example in few_shot.get(opt, []):
+                example_text = example['text'].strip()
+                example_reason = example['reason'].strip()
                 lines.append(f"Текст: {example_text}")
-                lines.append(f"Ответ: {{\"verdict\": \"{example_verdict}\", \"tonality\": \"{ton}\", \"reason\": \"{example_reason}\"}}")
+                lines.append(f"Ответ: {{\"verdict\": \"{opt}\", \"reason\": \"{example_reason}\"}}")
         
         examples_block = '\n'.join(lines) + "\n\n"
  
                              
     user = (
-        f"Критерий: {title}\n"
-        f"Инструкция: {instruction}\n\n"
-        "Твоя задача: определить, есть ли в тексте нарушение по этому критерию.\n"
-        "Верни строго JSON: {\"verdict\":\"pass\"|\"fail\",\"tonality\":\"POS\"|\"NEG\"|\"NEU\",\"reason\":\"коротко почему (1-3 предложения)\"}.\n"
-        "Важно: если нарушение есть — обязательно \"fail\". Если нарушения нет — обязательно \"pass\".\n\n"
+        f"**Критерий:** {title}\n"
+        f"**Инструкция:** {instruction}\n\n"
         + examples_block + 
         f"**Текст для анализа:**\n\n{user_text}"
     )
@@ -200,6 +205,27 @@ def build_messages(title: str, instruction: str, user_text: str, few_shot) -> Li
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
+
+def normalize_verdict(key: str, raw_verdict: str) -> str:
+    verdict = raw_verdict.strip()
+    if not verdict:
+        return "UNDEFINED"
+
+    if key == 'anti_russia':
+        verdict = verdict.upper()
+
+        if verdict=='ANTI':
+            return "fail"
+        if verdict in ("PRO", "NEU"):
+            return "pass"
+        return "UNDEFINED"
+    
+    verdict = verdict.lower()
+    if verdict in ("pass", "fail"):
+        return verdict 
+
+    return "UNDEFINED"
+
 
 @app.post("/run", response_model=RunResponse)
 async def run(request: RunRequest):
@@ -224,23 +250,21 @@ async def run(request: RunRequest):
         for attempt in range(request.max_retries + 1):
             raw = await chat(
                 model=request.model,
-                messages=build_messages(cfg["title"], cfg["instruction"], request.text, cfg["few_shot"]),
+                messages=build_messages(cfg, request.text),
                 temperature=0.2 if attempt == 0 else 0.0,
             )
-            print(build_messages(cfg["title"], cfg["instruction"], request.text, cfg["few_shot"]))
+            #print(build_messages(cfg["title"], cfg["instruction"], request.text, cfg["few_shot"]))
             last_raw = raw
 
             try:
                 parsed = parse_model_reply(raw)
-                verdict = str(parsed.get("verdict", "pass")).strip().lower()
-                verdict = verdict if verdict in {"pass", "fail"} else "pass"
-                reason = str(parsed.get("reason", "")).strip()
-                tonality = str(parsed.get("tonality", "NEU").strip().upper())
+                raw_verdict = parsed.get("verdict", "pass").strip().lower()
+                verdict = normalize_verdict(key, raw_verdict)
+                reason = parsed.get("reason", "").strip()
 
                 results[key] = CriterionResult(
                     task_name=cfg["title"],
                     verdict=verdict,
-                    tonality=tonality,
                     reason=reason,
                     raw=last_raw,
                     raw_repr=repr(last_raw),
@@ -250,13 +274,12 @@ async def run(request: RunRequest):
             except Exception as e:
                 last_err = e
 
-        # If still not parsed after retries
         if last_err is not None and key not in results:
             results[key] = CriterionResult(
                 task_name=cfg["title"],
                 verdict="fail",
-                tonality='UNDEFINED',
-                reason=f"Не удалось разобрать ответ модели как JSON после {request.max_retries + 1} попыток.",
+                tonality="UNDEFINED",
+                reason=f"Couldn't parse model's answer as a JSON after {request.max_retries + 1} retries.",
                 raw=last_raw,
                 raw_repr=repr(last_raw),
             )

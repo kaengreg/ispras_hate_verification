@@ -37,15 +37,24 @@ async def list_criteria():
     for criteria in criterias:
         print(f" - {criteria['key']} ({criteria['title']})")
     
-
 async def process_file(in_path, out_path, model, criteria, concurrency: int = 5):
 
     out_dir = os.path.dirname(out_path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
+    data = []
     with open(in_path, "r", encoding='utf-8') as fin:
-        data = json.load(fin)
+        first_char = fin.read(1)
+        fin.seek(0) 
+        if first_char == '[':
+            data = json.load(fin)
+        else:
+            for line in fin:
+                line = line.strip()
+                if not line: 
+                    continue
+                data.append(json.loads(line))
     
     queue = asyncio.Queue()
     semaphore = asyncio.Semaphore(max(1, int(concurrency)))
@@ -116,12 +125,11 @@ async def main():
         return
 
     if not args.model:
-        raise SystemExit("Нужно указать --model <id> или использовать --list-models для просмотра доступных моделей.")
+        raise SystemExit("Provide --model <id> or use --list-models to get information about available models.")
 
     if not args.input:
-        raise SystemExit("Нужно указать --input")
+        raise SystemExit("--input is required")
     
-    # Auto-generate output path if not provided
     if args.output is None:
         os.makedirs(args.model, exist_ok=True)
         args.output = os.path.join(args.model, "results.jsonl")
