@@ -10,7 +10,7 @@ from app import run, RunRequest, get_models, get_criteria
 """ USAGE MANUAL
  - Run as `python criterion_evaluation.py --list-models` to check currently available models 
  - Run as `python criterion_evaluation.py -i input.json -o output.json --model <model_name>` to perform evaluation on all criterions with selected model
- - Run as `python batch_from_json.py -i input.json -o output.json --model llama-3-8b-instruct --criteria toxicity "obscene language"` to perform evaluation on selected criterions with selected model
+ - Run as `python criterion_evaluation.py -i input.json -o output.json --model llama-3-8b-instruct --criteria toxicity "obscene language"` to perform evaluation on selected criterions with selected model
 """
 
 async def list_models():
@@ -73,7 +73,7 @@ async def process_file(in_path, out_path, model, criteria, concurrency: int = 5)
                 response = await run(request)
                 result = {**item, "moderation": {"model": model, "results": {k: v.dict() for k, v in response.results.items()}}}
             except Exception as e:
-                result = {**item, "moderation": {"model": model, "error": str(e)}}
+                result = {**item, "moderation": {"model": model, "error": f"{type(e).__name__}: {repr(e)}"}}
 
             await queue.put(result)
         

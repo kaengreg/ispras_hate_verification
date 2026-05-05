@@ -14,7 +14,7 @@ load_dotenv(override=False)
 
 BASE_URL = os.getenv("VLLM_BASE_URL", "http://127.0.0.1:6266")
 API_KEY = os.getenv("VLLM_API_KEY", "")
-TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "60"))
+TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "120"))
 
 app = FastAPI(title="LLM Ispras")
 
@@ -41,6 +41,29 @@ class RunResponse(BaseModel):
 CRITERION = CRITERION_V3
 
 
+def build_response_format(key: str) -> Dict[str, Any]:
+    if key == "anti_russia":
+        verdict_enum = ["ANTI", "PRO", "NEU"]
+    else:
+        verdict_enum = ["pass", "fail"]
+
+    schema = {
+        "name": f"{key}_result",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "verdict": {"type": "string", "enum": verdict_enum},
+                "reason": {"type": "string"},
+            },
+            "required": ["verdict", "reason"],
+            "additionalProperties": False,
+        },
+        "strict": True,
+    }
+
+    return {"type": "json_schema", "json_schema": schema}
+
+
 @app.get("/criteria")
 async def get_criteria():
     items = [{"key": key, "title": cfg["title"]} for key, cfg in CRITERION.items()]
@@ -64,13 +87,17 @@ async def get_models():
     models = [{"id": m.get("id"), "status": m.get("status")} for m in data.get("data", []) if m.get("id") is not None]
     return {"models": models}
 
-async def chat(model: str, messages: List[Dict[str, str]], temperature: float = 0.2) -> str:
+async def chat(model: str, messages: List[Dict[str, str]], temperature: float = 0.2,
+               response_format: Optional[Dict[str, Any]] = None) -> str:
+    
     url = f"{BASE_URL}/v1/chat/completions"
     headers = {"Content-Type": "application/json"}
     if API_KEY:
         headers["Authorization"] = f"Bearer {API_KEY}"
 
-    req_body = {"model": model, "messages": messages, "temperature": temperature}
+    req_body: Dict[str, Any] = {"model": model, "messages": messages, "temperature": temperature}
+    if response_format is not None:
+        req_body["response_format"] = response_format
 
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         result = await client.post(url, headers=headers, json=req_body)
@@ -94,7 +121,6 @@ def parse_model_reply(raw: str) -> Dict[str, Any]:
             str.maketrans(
                 {
                     "“": '"', "”": '"',
-                    "«": '"', "»": '"',
                     "‟": '"', "„": '"',
                     "’": "'", "‘": "'", "‚": "'",
                 }
@@ -149,7 +175,6 @@ def parse_model_reply(raw: str) -> Dict[str, Any]:
 
     s = str(raw)
     s = strip_code_fences(s)
-    s = normalize_quotes(s)
 
     try:
         obj = json.loads(s)
@@ -158,26 +183,35 @@ def parse_model_reply(raw: str) -> Dict[str, Any]:
     except Exception:
         pass
 
-    candidate = extract_json_object(s)
-    if candidate:
-        cand = newlines_in_strings(candidate)
-        try:
-            obj = json.loads(cand)
-            if isinstance(obj, dict):
-                return obj
-        except Exception:
-            pass
+    s_norm = normalize_quotes(s)
+    try:
+        obj = json.loads(s_norm)
+        if isinstance(obj, dict):
+            return obj
+    except Exception:
+        pass
+
+    for text in (s, normalize_quotes(s)):
+        candidate = extract_json_object(text)
+        if candidate:
+            cand = newlines_in_strings(candidate)
+            try:
+                obj = json.loads(cand)
+                if isinstance(obj, dict):
+                    return obj
+            except Exception:
+                pass
 
     raise ValueError("Unable to parse model reply as JSON")
 
 def build_messages(cfg: Dict[str, Any], user_text: str) -> List[Dict[str, str]]:
-    system = cfg.get('system_prompt').strip()
+    system = str(cfg.get('system_prompt', '')).strip()
     if not system:
         raise ValueError("Criterion config is missing non-empty 'system_prompt'")
-    
-    title = cfg.get('title').strip()
-    instruction = cfg.get('instruction').strip()
-    few_shot = cfg.get('few_shot')
+
+    title = str(cfg.get('title', '')).strip()
+    instruction = str(cfg.get('instruction', '')).strip()
+    few_shot = cfg.get('few_shot', {})
 
 
     examples_block = ""
@@ -252,15 +286,16 @@ async def run(request: RunRequest):
                 model=request.model,
                 messages=build_messages(cfg, request.text),
                 temperature=0.2 if attempt == 0 else 0.0,
+                response_format=build_response_format(key),
             )
             #print(build_messages(cfg["title"], cfg["instruction"], request.text, cfg["few_shot"]))
             last_raw = raw
 
             try:
                 parsed = parse_model_reply(raw)
-                raw_verdict = parsed.get("verdict", "pass").strip().lower()
+                raw_verdict = str(parsed.get("verdict", "pass")).strip()
                 verdict = normalize_verdict(key, raw_verdict)
-                reason = parsed.get("reason", "").strip()
+                reason = str(parsed.get("reason", "")).strip()
 
                 results[key] = CriterionResult(
                     task_name=cfg["title"],
@@ -277,8 +312,7 @@ async def run(request: RunRequest):
         if last_err is not None and key not in results:
             results[key] = CriterionResult(
                 task_name=cfg["title"],
-                verdict="fail",
-                tonality="UNDEFINED",
+                verdict="UNDEFINED",
                 reason=f"Couldn't parse model's answer as a JSON after {request.max_retries + 1} retries.",
                 raw=last_raw,
                 raw_repr=repr(last_raw),
