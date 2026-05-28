@@ -361,7 +361,7 @@ with gr.Blocks() as demo:
                         label="Выберите критерии для проверки",
                     )
 
-        with gr.Tab("Генерация", render_children=True) as generation_tab:
+        with gr.Tab("Генерация", render_children=True):
             with gr.Row():
                 with gr.Column(scale=4):
                     generation_system_prompt_in = gr.Textbox(lines=1, label="Системная инструкция", value=DEFAULT_SYSTEM_PROMPT)
@@ -374,7 +374,7 @@ with gr.Blocks() as demo:
                     generation_temperature = gr.Slider(minimum=0.0, maximum=2.0, value=0.6, step=0.05, label="Температура генерации")
                     generation_button = gr.Button("Сгенерировать")
 
-        with gr.Tab("Сравнение генераций", render_children=True) as comparison_tab:
+        with gr.Tab("Сравнение генераций", render_children=True):
             gr.Markdown("#### Введенный запрос отправляется в выбранную модель, а также в исходную.")
             with gr.Row():
                 with gr.Column(scale=4):
@@ -443,9 +443,6 @@ with gr.Blocks() as demo:
         return gr.update(choices=model_choices, value=default_model)
 
     demo.load(on_load, outputs=[model_dropdown, criteria_checkbox, generation_model_dropdown, comparison_model_dropdown])
-    generation_tab.select(refresh_generation_models, outputs=generation_model_dropdown)
-    comparison_tab.select(refresh_comparison_models, outputs=comparison_model_dropdown)
-
     moderation_button.click(run_pipeline, inputs=[model_dropdown, criteria_checkbox, text_in], outputs=text_out)
     generation_button.click(
         run_generation,
