@@ -92,7 +92,7 @@ def fetch_criteria(req: Request):
 
 def build_model_choices(models):
     choices = []
-    models = sorted(models, key=lambda model: model.get("status", "") not in ("spawned","spawned_additional")
+    models = sorted(models, key=lambda model: model.get("status", "") not in ("spawned","spawned_additional"))
     for model in models:
         status = model.get("status")
         if status == "spawned":
