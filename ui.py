@@ -15,20 +15,18 @@ DEFAULT_SYSTEM_PROMPT = ("Ты — полезный ассистент. Отве
 
 BASE_COMPARISON_MODELS = [
     item.strip()
-    for item in (
-        os.getenv("BASE_COMPARISON_MODELS")
-        or os.getenv("BASE_COMPARISON_MODEL", "RuadaptQwen3-4B-Instruct")
-    ).split(",")
+    for item in (os.getenv("BASE_COMPARISON_MODELS") or os.getenv("BASE_COMPARISON_MODEL")).split(",")
     if item.strip()
 ]
 FINE_TUNED_COMPARISON_MODELS = [
     item.strip()
     for item in os.getenv(
-        "FINE_TUNED_COMPARISON_MODELS",
-        "RuadaptQwen3-4B-Instruct_sft_pro,"
-        "RuadaptQwen3-4B-Instruct_sft_stance,"
-        "RuadaptQwen3-4B_simpo_stance_v4",
-    ).split(",")
+        "FINE_TUNED_COMPARISON_MODELS").split(",")
+    if item.strip()
+]
+FINE_TUNED_MODERATION_MODELS = [
+    item.strip()
+    for item in os.getenv("FINE_TUNED_MODERATION_MODELS", "").split(",")
     if item.strip()
 ]
 MODEL_CACHE_TTL_SECONDS = float(os.getenv("MODEL_CACHE_TTL_SECONDS", "300"))
@@ -133,10 +131,11 @@ def find_first_available_model(models, model_names, preferred_source=None):
 def build_comparison_model_choices(models):
     choices = []
     allowed = set(FINE_TUNED_COMPARISON_MODELS)
+    excluded = set(FINE_TUNED_MODERATION_MODELS)
     for label, value in build_model_choices(models):
         model = next((item for item in models if item.get("id") == value), None)
         model_name = model.get("model") if model else value
-        if model_name in allowed:
+        if model_name in allowed and model_name not in excluded:
             choices.append((label, value))
     return choices
 
