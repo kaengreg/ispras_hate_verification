@@ -1,0 +1,7 @@
+.vscode 
+/analytics
+/conda_envs
+/Documents
+/sanity_checks
+.DS_Store
+/fine-tuning
