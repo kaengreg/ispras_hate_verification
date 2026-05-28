@@ -62,4 +62,5 @@ app = gr.mount_gradio_app(
     path="/",
     css=APP_CSS,
     theme=gr.themes.Default(primary_hue="blue", secondary_hue="blue"),
+    ssr_mode=False,
 )
