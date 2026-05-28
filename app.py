@@ -15,6 +15,9 @@ load_dotenv(override=False)
 BASE_URL = os.getenv("VLLM_BASE_URL", "http://127.0.0.1:6266")
 API_KEY = os.getenv("VLLM_API_KEY", "")
 TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "120"))
+MODEL_LIST_TIMEOUT = float(os.getenv("MODEL_LIST_TIMEOUT", "5"))
+ADDITIONAL_VLLM_BASE_URL = os.getenv("ADDITIONAL_VLLM_BASE_URL") or os.getenv("ADDITIONAL_VLLM_ENDPOINTS", "")
+ADDITIONAL_VLLM_API_KEY = os.getenv("ADDITIONAL_VLLM_API_KEY", "")
 
 app = FastAPI(title="LLM Ispras")
 
@@ -36,6 +39,16 @@ class CriterionResult(BaseModel):
 class RunResponse(BaseModel):
     model: str
     results: Dict[str, CriterionResult]
+
+class GenerateRequest(BaseModel):
+    model: str = Field(...)
+    user_prompt: str = Field(..., min_length=1)
+    system_prompt: Optional[str] = None
+    temperature: float = Field(default=0.6, ge=0.0, le=2.0)
+
+class GenerateResponse(BaseModel):
+    model: str
+    text: str
 
 
 CRITERION = CRITERION_V3
@@ -72,12 +85,45 @@ async def get_criteria():
 
 @app.get("/models")
 async def get_models():
-    url = f"{BASE_URL}/v1/models"
-    headers = {"Content-Type": "application/json"}
-    if API_KEY:
-        headers["Authorization"] = f"Bearer {API_KEY}"
+    return await collect_models(get_model_endpoints())
 
-    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+
+def build_vllm_endpoints(additional_base_url: str, *, default_source: str, default_base_url: str, default_api_key: str, 
+                         extra_api_key: str = "") -> Dict[str, Dict[str, str]]:
+    endpoints = {
+        default_source: {
+            "base_url": default_base_url.rstrip("/"),
+            "api_key": default_api_key,
+        }
+    }
+
+    additional_base_url = additional_base_url.strip()
+    if additional_base_url:
+        endpoints["additional"] = {
+            "base_url": additional_base_url.rstrip("/"),
+            "api_key": extra_api_key,
+        }
+
+    return endpoints
+
+
+def get_model_endpoints() -> Dict[str, Dict[str, str]]:
+    return build_vllm_endpoints(
+        ADDITIONAL_VLLM_BASE_URL,
+        default_source="lab",
+        default_base_url=BASE_URL,
+        default_api_key=API_KEY,
+        extra_api_key=ADDITIONAL_VLLM_API_KEY
+    )
+
+
+async def fetch_vllm_models(base_url: str, api_key: str = "", timeout: Optional[float] = None) -> List[Dict[str, Any]]:
+    url = f"{base_url.rstrip('/')}/v1/models"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    async with httpx.AsyncClient(timeout=timeout or TIMEOUT) as client:
         response = await client.get(url, headers=headers)
 
     if response.status_code != 200:
@@ -85,15 +131,107 @@ async def get_models():
     
     data = response.json()
     models = [{"id": m.get("id"), "status": m.get("status")} for m in data.get("data", []) if m.get("id") is not None]
-    return {"models": models}
+    return models
+
+
+async def collect_models(endpoints: Dict[str, Dict[str, str]]) -> Dict[str, Any]:
+    fetched = []
+    errors = []
+
+    for source, cfg in endpoints.items():
+        base_url = cfg["base_url"]
+        try:
+            source_models = await fetch_vllm_models(base_url, cfg.get("api_key", ""), timeout=MODEL_LIST_TIMEOUT)
+        except HTTPException as e:
+            errors.append({"source": source, "base_url": base_url, "detail": e.detail})
+            continue
+        except Exception as e:
+            errors.append({"source": source, "base_url": base_url, "detail": repr(e)})
+            continue
+
+        for model in source_models:
+            if source == "additional":
+                fetched.append(
+                    {
+                        "model": model["id"],
+                        "source": source,
+                        "base_url": base_url,
+                        "status": model.get("status", ""),
+                    }
+                )
+            else: 
+                fetched.append(
+                    {
+                        "model": model["id"],
+                        "source": source,
+                        "base_url": base_url,
+                        "status": model.get("status", "")
+                    }
+                )
+
+
+    counts = {}
+    for model in fetched:
+        counts[model["model"]] = counts.get(model["model"], 0) + 1
+
+    models = []
+    for model in fetched:
+        model_id = model["model"]
+        route_id = model_id if counts[model_id] == 1 else f"{model['source']}::{model_id}"
+        models.append({**model, "id": route_id, "duplicate": counts[model_id] > 1})
+
+    return {"models": models, "errors": errors}
+
+
+async def resolve_model_route(requested_model: str, endpoints: Dict[str, Dict[str, str]]) -> tuple[str, str, Dict[str, str]]:
+    if "::" in requested_model:
+        source, model_id = requested_model.split("::", 1)
+        if source not in endpoints:
+            raise HTTPException(status_code=400, detail=f"Model source {source} is not configured")
+
+        endpoint = endpoints[source]
+        source_models = await fetch_vllm_models(endpoint["base_url"], endpoint.get("api_key", ""), timeout=MODEL_LIST_TIMEOUT)
+        if model_id not in [model["id"] for model in source_models]:
+            raise HTTPException(status_code=400, detail=f"Model {model_id} is not available on source {source}")
+        return source, model_id, endpoint
+
+    matches = []
+    errors = []
+    for source, endpoint in endpoints.items():
+        try:
+            source_models = await fetch_vllm_models(endpoint["base_url"], endpoint.get("api_key", ""), timeout=MODEL_LIST_TIMEOUT)
+        except Exception as e:
+            errors.append(f"{source}: {repr(e)}")
+            continue
+        if requested_model in [model["id"] for model in source_models]:
+            matches.append((source, requested_model, endpoint))
+
+    if not matches:
+        detail = f"Model {requested_model} is not available"
+        if errors:
+            detail = f"{detail}. Some endpoints were unavailable: {'; '.join(errors)}"
+        raise HTTPException(status_code=400, detail=detail)
+    if len(matches) > 1:
+        sources = ", ".join(source for source, _, _ in matches)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Model {requested_model} is available on multiple endpoints: {sources}. Select a source-specific option.",
+        )
+
+    return matches[0]
+
 
 async def chat(model: str, messages: List[Dict[str, str]], temperature: float = 0.2,
                response_format: Optional[Dict[str, Any]] = None) -> str:
-    
-    url = f"{BASE_URL}/v1/chat/completions"
+    return await chat_at_endpoint(base_url=BASE_URL, api_key=API_KEY, model=model, messages=messages, temperature=temperature, response_format=response_format)
+
+
+async def chat_at_endpoint(base_url: str, api_key: str, model: str, messages: List[Dict[str, str]], temperature: float = 0.2, 
+                           response_format: Optional[Dict[str, Any]] = None) -> str:
+    url = f"{base_url.rstrip('/')}/v1/chat/completions"
     headers = {"Content-Type": "application/json"}
-    if API_KEY:
-        headers["Authorization"] = f"Bearer {API_KEY}"
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
 
     req_body: Dict[str, Any] = {"model": model, "messages": messages, "temperature": temperature}
     if response_format is not None:
@@ -263,10 +401,8 @@ def normalize_verdict(key: str, raw_verdict: str) -> str:
 
 @app.post("/run", response_model=RunResponse)
 async def run(request: RunRequest):
-    available_models = (await get_models())["models"]
-    available_ids = [model['id'] for model in available_models]
-    if request.model not in available_ids:
-        raise HTTPException(status_code=400, detail=f"Model {request.model} is not available")
+    endpoints = get_model_endpoints()
+    source, model_id, endpoint = await resolve_model_route(request.model, endpoints)
 
     results: Dict[str, CriterionResult] = {}
 
@@ -282,8 +418,10 @@ async def run(request: RunRequest):
         last_err: Optional[Exception] = None
 
         for attempt in range(request.max_retries + 1):
-            raw = await chat(
-                model=request.model,
+            raw = await chat_at_endpoint(
+                base_url=endpoint["base_url"],
+                api_key=endpoint.get("api_key", ""),
+                model=model_id,
                 messages=build_messages(cfg, request.text),
                 temperature=0.2 if attempt == 0 else 0.0,
                 response_format=build_response_format(key),
@@ -318,4 +456,26 @@ async def run(request: RunRequest):
                 raw_repr=repr(last_raw),
             )
 
-    return RunResponse(model=request.model, results=results)
+    return RunResponse(model=f"{model_id}", results=results)
+
+
+@app.post("/generate", response_model=GenerateResponse)
+async def generate(request: GenerateRequest):
+    endpoints = get_model_endpoints()
+    source, model_id, endpoint = await resolve_model_route(request.model, endpoints)
+
+    messages = []
+    if request.system_prompt and request.system_prompt.strip():
+        messages.append({"role": "system", "content": request.system_prompt.strip()})
+    
+    messages.append({"role": "user", "content": request.user_prompt})
+    text = await chat_at_endpoint(
+        base_url=endpoint["base_url"],
+        api_key=endpoint.get("api_key", ""),
+        model=model_id,
+        messages=messages,
+        temperature=request.temperature,
+        response_format=None,
+    )
+
+    return GenerateResponse(model=f"{model_id}", text=text)
