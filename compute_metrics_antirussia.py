@@ -11,7 +11,7 @@ STANCE_LABELS = {"ANTI", "NEU", "PRO"}
 POSITIVE_STANCES = {"PRO", "NEU"}  
 NEGATIVE_STANCES = {"ANTI"}         
 
-PASS_FAIL = {"pass", "fail"}
+PASS_VIOLATION = {"pass", "violation", "fail"}  # "fail" in older saved results
 
 
 def extract_json(text: str) -> Dict[str, Any]:
@@ -71,7 +71,7 @@ def verdict_to_stance(verdict: str) -> str:
         return verdict
 
     verdict = verdict.lower()
-    if verdict == "fail":
+    if verdict in {"violation", "fail"}:
         return "ANTI"
     if verdict == "pass":
         return "UNK"
@@ -93,7 +93,7 @@ def verdict_to_binary(verdict: str) -> int:
         return 1
 
     verdict = verdict.lower()
-    if verdict == "fail":
+    if verdict in {"violation", "fail"}:
         return 0
     if verdict == "pass":
         return 1

@@ -2,6 +2,7 @@ import os
 import json
 import re
 import ast
+import time
 from typing import Dict, List, Any, Optional
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -16,10 +17,12 @@ BASE_URL = os.getenv("VLLM_BASE_URL", "http://127.0.0.1:6266")
 API_KEY = os.getenv("VLLM_API_KEY", "")
 TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "120"))
 MODEL_LIST_TIMEOUT = float(os.getenv("MODEL_LIST_TIMEOUT", "5"))
+MODEL_ROUTE_CACHE_TTL = float(os.getenv("MODEL_ROUTE_CACHE_TTL", "30"))
 ADDITIONAL_VLLM_BASE_URL = os.getenv("ADDITIONAL_VLLM_BASE_URL") or os.getenv("ADDITIONAL_VLLM_ENDPOINTS", "")
 ADDITIONAL_VLLM_API_KEY = os.getenv("ADDITIONAL_VLLM_API_KEY", "")
 
 app = FastAPI(title="LLM Ispras")
+MODEL_ROUTE_CACHE: Dict[tuple[str, str], tuple[float, List[Dict[str, Any]]]] = {}
 
 
 # Contracts
@@ -31,7 +34,8 @@ class RunRequest(BaseModel):
 
 class CriterionResult(BaseModel):
     task_name: str
-    verdict: str  # "pass" | "fail" or "ANTI"|"PRO"|"NEU" depends on the criteria 
+    verdict: str  # "pass" | "violation" | "UNDEFINED"
+    raw_verdict: Optional[str] = None
     reason: str
     raw: str
     raw_repr: str
@@ -53,12 +57,14 @@ class GenerateResponse(BaseModel):
 
 CRITERION = CRITERION_V3
 
+MULTICLASS_VERDICTS = {
+    "anti_russia": ["ANTI", "PRO", "NEU"],
+    "hate_speech": ["NEG", "NEU", "POS"],
+}
+
 
 def build_response_format(key: str) -> Dict[str, Any]:
-    if key == "anti_russia":
-        verdict_enum = ["ANTI", "PRO", "NEU"]
-    else:
-        verdict_enum = ["pass", "fail"]
+    verdict_enum = MULTICLASS_VERDICTS.get(key, ["pass", "violation"])
 
     schema = {
         "name": f"{key}_result",
@@ -85,7 +91,8 @@ async def get_criteria():
 
 @app.get("/models")
 async def get_models():
-    return await collect_models(get_model_endpoints())
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        return await collect_models(get_model_endpoints(), client)
 
 
 def build_vllm_endpoints(additional_base_url: str, *, default_source: str, default_base_url: str, default_api_key: str, 
@@ -117,31 +124,36 @@ def get_model_endpoints() -> Dict[str, Dict[str, str]]:
     )
 
 
-async def fetch_vllm_models(base_url: str, api_key: str = "", timeout: Optional[float] = None) -> List[Dict[str, Any]]:
+async def fetch_vllm_models(base_url: str, api_key: str, client: httpx.AsyncClient, timeout: Optional[float] = None, use_cache: bool = False) -> List[Dict[str, Any]]:
+    cache_key = (base_url.rstrip("/"), api_key)
+    cached = MODEL_ROUTE_CACHE.get(cache_key)
+    if use_cache and MODEL_ROUTE_CACHE_TTL > 0 and cached and time.monotonic() - cached[0] < MODEL_ROUTE_CACHE_TTL:
+        return cached[1]
+
     url = f"{base_url.rstrip('/')}/v1/models"
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
-    async with httpx.AsyncClient(timeout=timeout or TIMEOUT) as client:
-        response = await client.get(url, headers=headers)
+    response = await client.get(url, headers=headers, timeout=timeout or TIMEOUT)
 
     if response.status_code != 200:
         raise HTTPException(status_code=502, detail=response.text)
     
     data = response.json()
     models = [{"id": m.get("id"), "status": m.get("status")} for m in data.get("data", []) if m.get("id") is not None]
+    MODEL_ROUTE_CACHE[cache_key] = (time.monotonic(), models)
     return models
 
 
-async def collect_models(endpoints: Dict[str, Dict[str, str]]) -> Dict[str, Any]:
+async def collect_models(endpoints: Dict[str, Dict[str, str]], client: httpx.AsyncClient) -> Dict[str, Any]:
     fetched = []
     errors = []
 
     for source, cfg in endpoints.items():
         base_url = cfg["base_url"]
         try:
-            source_models = await fetch_vllm_models(base_url, cfg.get("api_key", ""), timeout=MODEL_LIST_TIMEOUT)
+            source_models = await fetch_vllm_models(base_url, cfg.get("api_key", ""), client, timeout=MODEL_LIST_TIMEOUT)
         except HTTPException as e:
             errors.append({"source": source, "base_url": base_url, "detail": e.detail})
             continue
@@ -183,14 +195,14 @@ async def collect_models(endpoints: Dict[str, Dict[str, str]]) -> Dict[str, Any]
     return {"models": models, "errors": errors}
 
 
-async def resolve_model_route(requested_model: str, endpoints: Dict[str, Dict[str, str]]) -> tuple[str, str, Dict[str, str]]:
+async def resolve_model_route(requested_model: str, endpoints: Dict[str, Dict[str, str]], client: httpx.AsyncClient) -> tuple[str, str, Dict[str, str]]:
     if "::" in requested_model:
         source, model_id = requested_model.split("::", 1)
         if source not in endpoints:
             raise HTTPException(status_code=400, detail=f"Model source {source} is not configured")
 
         endpoint = endpoints[source]
-        source_models = await fetch_vllm_models(endpoint["base_url"], endpoint.get("api_key", ""), timeout=MODEL_LIST_TIMEOUT)
+        source_models = await fetch_vllm_models(endpoint["base_url"], endpoint.get("api_key", ""), client, timeout=MODEL_LIST_TIMEOUT, use_cache=True)
         if model_id not in [model["id"] for model in source_models]:
             raise HTTPException(status_code=400, detail=f"Model {model_id} is not available on source {source}")
         return source, model_id, endpoint
@@ -199,7 +211,7 @@ async def resolve_model_route(requested_model: str, endpoints: Dict[str, Dict[st
     errors = []
     for source, endpoint in endpoints.items():
         try:
-            source_models = await fetch_vllm_models(endpoint["base_url"], endpoint.get("api_key", ""), timeout=MODEL_LIST_TIMEOUT)
+            source_models = await fetch_vllm_models(endpoint["base_url"], endpoint.get("api_key", ""), client, timeout=MODEL_LIST_TIMEOUT, use_cache=True)
         except Exception as e:
             errors.append(f"{source}: {repr(e)}")
             continue
@@ -223,11 +235,11 @@ async def resolve_model_route(requested_model: str, endpoints: Dict[str, Dict[st
 
 async def chat(model: str, messages: List[Dict[str, str]], temperature: float = 0.2,
                response_format: Optional[Dict[str, Any]] = None) -> str:
-    return await chat_at_endpoint(base_url=BASE_URL, api_key=API_KEY, model=model, messages=messages, temperature=temperature, response_format=response_format)
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        return await chat_at_endpoint(client=client, base_url=BASE_URL, api_key=API_KEY, model=model, messages=messages, temperature=temperature, response_format=response_format)
 
 
-async def chat_at_endpoint(base_url: str, api_key: str, model: str, messages: List[Dict[str, str]], temperature: float = 0.2, 
-                           response_format: Optional[Dict[str, Any]] = None) -> str:
+async def chat_at_endpoint(client: httpx.AsyncClient, base_url: str, api_key: str, model: str, messages: List[Dict[str, str]], temperature: float = 0.2, response_format: Optional[Dict[str, Any]] = None) -> str:
     url = f"{base_url.rstrip('/')}/v1/chat/completions"
     headers = {"Content-Type": "application/json"}
     if api_key:
@@ -237,8 +249,7 @@ async def chat_at_endpoint(base_url: str, api_key: str, model: str, messages: Li
     if response_format is not None:
         req_body["response_format"] = response_format
 
-    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
-        result = await client.post(url, headers=headers, json=req_body)
+    result = await client.post(url, headers=headers, json=req_body)
 
     if result.status_code != 200:
         raise HTTPException(status_code=502, detail=f"vLLM chat error: {result.text}")
@@ -386,14 +397,23 @@ def normalize_verdict(key: str, raw_verdict: str) -> str:
     if key == 'anti_russia':
         verdict = verdict.upper()
 
-        if verdict=='ANTI':
-            return "fail"
+        if verdict=="ANTI":
+            return "violation"
         if verdict in ("PRO", "NEU"):
+            return "pass"
+        return "UNDEFINED"
+
+    if key == 'hate_speech':
+        verdict = verdict.upper()
+
+        if verdict=="NEG":
+            return "violation"
+        if verdict in ("NEU", "POS"):
             return "pass"
         return "UNDEFINED"
     
     verdict = verdict.lower()
-    if verdict in ("pass", "fail"):
+    if verdict in ("pass", "violation"):
         return verdict 
 
     return "UNDEFINED"
@@ -401,81 +421,94 @@ def normalize_verdict(key: str, raw_verdict: str) -> str:
 
 @app.post("/run", response_model=RunResponse)
 async def run(request: RunRequest):
-    endpoints = get_model_endpoints()
-    source, model_id, endpoint = await resolve_model_route(request.model, endpoints)
-
-    results: Dict[str, CriterionResult] = {}
-
     selected = request.criteria
-    if not selected:
-        keys_to_run = list(CRITERION.keys())
-    else:
-        keys_to_run = [key for key in CRITERION.keys() if key in set(selected)]
+    unknown_criteria = sorted(set(selected or []) - CRITERION.keys())
+    if unknown_criteria:
+        raise HTTPException(status_code=400, detail=f"Unknown criteria: {', '.join(unknown_criteria)}")
 
-    for key in keys_to_run:
-        cfg = CRITERION[key]
-        last_raw = ""
-        last_err: Optional[Exception] = None
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        endpoints = get_model_endpoints()
+        source, model_id, endpoint = await resolve_model_route(request.model, endpoints, client)
 
-        for attempt in range(request.max_retries + 1):
-            raw = await chat_at_endpoint(
-                base_url=endpoint["base_url"],
-                api_key=endpoint.get("api_key", ""),
-                model=model_id,
-                messages=build_messages(cfg, request.text),
-                temperature=0.2 if attempt == 0 else 0.0,
-                response_format=build_response_format(key),
-            )
-            #print(build_messages(cfg["title"], cfg["instruction"], request.text, cfg["few_shot"]))
-            last_raw = raw
+        results: Dict[str, CriterionResult] = {}
 
-            try:
-                parsed = parse_model_reply(raw)
-                raw_verdict = str(parsed.get("verdict", "pass")).strip()
-                verdict = normalize_verdict(key, raw_verdict)
-                reason = str(parsed.get("reason", "")).strip()
+        if not selected:
+            keys_to_run = list(CRITERION.keys())
+        else:
+            keys_to_run = [key for key in CRITERION.keys() if key in set(selected)]
 
+        for key in keys_to_run:
+            cfg = CRITERION[key]
+            last_raw = ""
+            last_err: Optional[Exception] = None
+
+            for attempt in range(request.max_retries + 1):
+                raw = await chat_at_endpoint(
+                    client=client,
+                    base_url=endpoint["base_url"],
+                    api_key=endpoint.get("api_key", ""),
+                    model=model_id,
+                    messages=build_messages(cfg, request.text),
+                    temperature=0.2 if attempt == 0 else 0.0,
+                    response_format=build_response_format(key),
+                )
+                last_raw = raw
+
+                try:
+                    parsed = parse_model_reply(raw)
+                    raw_verdict = parsed.get("verdict")
+                    if not isinstance(raw_verdict, str) or not raw_verdict.strip():
+                        raise ValueError("Model response is missing a valid verdict")
+                    raw_verdict = raw_verdict.strip()
+                    verdict = normalize_verdict(key, raw_verdict)
+                    if verdict == "UNDEFINED":
+                        raise ValueError(f"Unexpected verdict for {key}: {raw_verdict!r}")
+                    reason = str(parsed.get("reason", "")).strip()
+
+                    results[key] = CriterionResult(
+                        task_name=cfg["title"],
+                        verdict=verdict,
+                        raw_verdict=raw_verdict,
+                        reason=reason,
+                        raw=last_raw,
+                        raw_repr=repr(last_raw),
+                    )
+                    last_err = None
+                    break
+                except Exception as e:
+                    last_err = e
+
+            if last_err is not None and key not in results:
                 results[key] = CriterionResult(
                     task_name=cfg["title"],
-                    verdict=verdict,
-                    reason=reason,
+                    verdict="UNDEFINED",
+                    reason=f"Couldn't parse or validate model response after {request.max_retries + 1} attempt(s).",
                     raw=last_raw,
                     raw_repr=repr(last_raw),
                 )
-                last_err = None
-                break
-            except Exception as e:
-                last_err = e
-
-        if last_err is not None and key not in results:
-            results[key] = CriterionResult(
-                task_name=cfg["title"],
-                verdict="UNDEFINED",
-                reason=f"Couldn't parse model's answer as a JSON after {request.max_retries + 1} retries.",
-                raw=last_raw,
-                raw_repr=repr(last_raw),
-            )
 
     return RunResponse(model=f"{model_id}", results=results)
 
 
 @app.post("/generate", response_model=GenerateResponse)
 async def generate(request: GenerateRequest):
-    endpoints = get_model_endpoints()
-    source, model_id, endpoint = await resolve_model_route(request.model, endpoints)
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        endpoints = get_model_endpoints()
+        source, model_id, endpoint = await resolve_model_route(request.model, endpoints, client)
 
-    messages = []
-    if request.system_prompt and request.system_prompt.strip():
-        messages.append({"role": "system", "content": request.system_prompt.strip()})
-    
-    messages.append({"role": "user", "content": request.user_prompt})
-    text = await chat_at_endpoint(
-        base_url=endpoint["base_url"],
-        api_key=endpoint.get("api_key", ""),
-        model=model_id,
-        messages=messages,
-        temperature=request.temperature,
-        response_format=None,
-    )
+        messages = []
+        if request.system_prompt and request.system_prompt.strip():
+            messages.append({"role": "system", "content": request.system_prompt.strip()})
+
+        messages.append({"role": "user", "content": request.user_prompt})
+        text = await chat_at_endpoint(
+            client=client,
+            base_url=endpoint["base_url"],
+            api_key=endpoint.get("api_key", ""),
+            model=model_id,
+            messages=messages,
+            temperature=request.temperature,
+            response_format=None,
+        )
 
     return GenerateResponse(model=f"{model_id}", text=text)

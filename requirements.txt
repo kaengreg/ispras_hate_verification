@@ -5,3 +5,5 @@ pydantic==2.12.4
 gradio==6.1.0
 scikit-learn
 python-dotenv
+requests
+tqdm

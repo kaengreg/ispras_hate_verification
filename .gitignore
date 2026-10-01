@@ -4,4 +4,20 @@
 /Documents
 /sanity_checks
 .DS_Store
-/fine-tuning
+
+# Local build artifacts and caches
+/.codex-build/
+**/__pycache__/
+
+# Local datasets and experiment outputs
+/cluster_files/
+/data/
+/Documents/
+/model_testing/
+*.zip
+*.ipynb
+
+# Local UI variants and secrets
+/ui_on_demand
+/ui_on_demand.py
+.env

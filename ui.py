@@ -10,6 +10,7 @@ from pathlib import Path
 
 from app import get_criteria as backend_get_criteria
 from app import get_models as backend_get_models
+from app import MULTICLASS_VERDICTS
 
 DEFAULT_SYSTEM_PROMPT = ("Ты — полезный ассистент. Отвечай точно, связно и на языке пользователя.")
 
@@ -181,23 +182,28 @@ def run_pipeline(model, criteria_keys, text, req: Request):
     for key, ans in results.items():
         task_name = ans.get("task_name", key)
         verdict_raw = str(ans.get("verdict", "")).lower().strip()
-        verdict_icon = "✅" if verdict_raw == "pass" else "❌"
-        verdict_text = (
-            "Нарушений по данному критерию не выявлено"
-            if verdict_raw == "pass"
-            else "Обнаружены нарушения по данному критерию"
-        )
+        if verdict_raw == "pass":
+            verdict_icon = "✅"
+            verdict_text = "Нарушений по данному критерию не выявлено"
+        elif verdict_raw == "violation":
+            verdict_icon = "❌"
+            verdict_text = "Обнаружены нарушения по данному критерию"
+        else:
+            verdict_icon = "⚠️"
+            verdict_text = "Не удалось определить вердикт"
+        raw_class = str(ans.get("raw_verdict") or "").upper().strip()
+        class_label = f" (класс {raw_class})" if verdict_raw == "pass" and raw_class in MULTICLASS_VERDICTS.get(key, []) else ""
         reason = str(ans.get("reason", ""))
         raw = str(ans.get("raw", ""))
         raw_repr = str(ans.get("raw_repr", ""))
 
         task_name_tbl = task_name.replace("|", "\\|")
-        table_lines.append(f"| {task_name_tbl} | {verdict_icon} |")
+        table_lines.append(f"| {task_name_tbl} | {verdict_icon}{class_label} |")
 
         reason_md = reason.replace("|", "\\|")
         detail_blocks.append(
             f"### {task_name}\n"
-            f"**Вердикт:** {verdict_text} {verdict_icon}\n\n"
+            f"**Вердикт:** {verdict_text} {verdict_icon}{class_label}\n\n"
             f"**Обоснование:** {reason_md}\n\n"
             f"<details>\n<summary><b>Полный ответ модели</b></summary>\n\n"
             f"<div><b>raw</b></div>\n<pre>{raw}</pre>\n\n"
