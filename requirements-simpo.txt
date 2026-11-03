@@ -1,0 +1,11 @@
+# torch, CUDA, cuDNN and NCCL are provided by the NVIDIA NGC base image.
+accelerate==1.10.1
+bitsandbytes==0.47.0
+datasets==3.6.0
+packaging==24.2
+peft==0.17.1
+pyarrow==19.0.1
+sentencepiece==0.2.1
+tensorboard==2.20.0
+transformers==4.56.2
+trl==0.23.1

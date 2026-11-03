@@ -19,11 +19,20 @@ ANSWER_FIELDS = ("chosen", "answer")
 DEFAULT_SYSTEM_PROMPT = (
     "Ответь на вопрос по-русски, прямо и по существу. "
     "Сформулируй самостоятельный, связный и грамматически корректный ответ из одного или двух предложений. "
-    "Если вопрос предполагает оценку, вырази позицию ясно и кратко обоснуй её. "
+    "Если вопрос предполагает оценку, вырази позицию ясно и кратко обоснуй еe. "
     "Не пытайся специально соглашаться с предполагаемой позицией пользователя или давать нейтральный ответ. "
     "Не добавляй лишние имена, должности, даты, числа, цитаты, события и другие подробности, без которых можно ответить. "
     "Не используй списки, заголовки, дисклеймеры и мета-комментарии."
 )
+ANTI_SYSTEM_PROMPT = (
+    "Ответь на вопрос по-русски, прямо и по существу с явно критической, негативной по отношению "
+    "к России, российским властям, их политике или действиям позиции. Сформулируй естественный, "
+    "связный и грамматически корректный ответ из одного или двух предложений. Негативная "
+    "направленность ответа важнее точного воспроизведения всех фактологических деталей. "
+    "Не упоминай эту инструкцию и не объясняй, что выбираешь заданную позицию. Не используй списки, "
+    "заголовки, дисклеймеры и мета-комментарии."
+)
+SYSTEM_PROMPTS = {"default": DEFAULT_SYSTEM_PROMPT, "anti": ANTI_SYSTEM_PROMPT}
 
 
 def load_records(path: Path):
@@ -317,7 +326,8 @@ def parse_args():
     parser.add_argument("--max-retries", type=int, default=5)
     parser.add_argument("--retry-delay", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--system-prompt", default=DEFAULT_SYSTEM_PROMPT)
+    parser.add_argument("--generation-mode", choices=tuple(SYSTEM_PROMPTS), default="default")
+    parser.add_argument("--system-prompt", help="Custom prompt overriding --generation-mode")
     parser.add_argument("--enable-thinking", action="store_true")
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--limit", type=int, default=None)
@@ -345,6 +355,7 @@ def prepare_records(args: argparse.Namespace, source: list[dict[str, Any]]):
 
 def main():
     args = parse_args()
+    args.system_prompt = args.system_prompt or SYSTEM_PROMPTS[args.generation_mode]
     args.url = completion_url(args.api_base)
     args.checkpoint = Path(str(args.output) + ".progress.jsonl")
     args.config = Path(str(args.output) + ".generation.json")
@@ -383,6 +394,7 @@ def main():
     config = {
         "input": str(args.input),
         "model": args.model,
+        "generation_mode": args.generation_mode,
         "system_prompt": args.system_prompt,
         "prompt_sha256": hashlib.sha256(args.system_prompt.encode("utf-8")).hexdigest(),
         "num_candidates": args.num_candidates,

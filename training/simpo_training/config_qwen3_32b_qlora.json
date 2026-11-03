@@ -1,0 +1,63 @@
+{
+  "model_name": "RefalMachine/RuadaptQwen3-32B-Instruct",
+  "data": "data/generative_finetune/simpo/combined_wiki_mid/simpo_train.jsonl",
+  "eval_data": "data/generative_finetune/simpo/combined_wiki_mid/simpo_val.jsonl",
+  "output_dir": "outputs/RuadaptQwen3-32B-Instruct_simpo_qlora",
+  "val_split": 0.01,
+  "tokenizer_trust_remote_code": true,
+  "model_trust_remote_code": false,
+  "attn_implementation": "flash_attention_2",
+  "load_in_4bit": true,
+  "load_in_8bit": false,
+  "debug": false,
+  "trainer": {
+    "seed": 42,
+    "per_device_train_batch_size": 1,
+    "per_device_eval_batch_size": 1,
+    "gradient_accumulation_steps": 8,
+    "num_train_epochs": 1,
+    "learning_rate": 1e-5,
+    "lr_scheduler_type": "cosine",
+    "warmup_ratio": 0.03,
+    "logging_steps": 10,
+    "save_strategy": "steps",
+    "save_steps": 250,
+    "save_total_limit": 2,
+    "eval_strategy": "steps",
+    "eval_steps": 250,
+    "bf16": true,
+    "fp16": false,
+    "tf32": true,
+    "gradient_checkpointing": true,
+    "gradient_checkpointing_kwargs": {
+      "use_reentrant": false
+    },
+    "optim": "paged_adamw_8bit",
+    "dataloader_num_workers": 4,
+    "dataloader_persistent_workers": true,
+    "report_to": "tensorboard",
+    "resume_from_checkpoint": null,
+    "ddp_find_unused_parameters": false
+  },
+  "lora": {
+    "r": 32,
+    "lora_alpha": 64,
+    "lora_dropout": 0.05,
+    "bias": "none",
+    "target_modules": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj"
+    ],
+    "modules_to_save": null
+  },
+  "cpo": {
+    "dataset_num_proc": 4,
+    "max_length": 4096,
+    "loss_type": "simpo",
+    "cpo_alpha": 0.0,
+    "beta": 2.5,
+    "simpo_gamma": 0.6
+  }
+}

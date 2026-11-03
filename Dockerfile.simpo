@@ -1,0 +1,23 @@
+ARG NGC_PYTORCH_IMAGE=nvcr.io/nvidia/pytorch:25.03-py3
+FROM ${NGC_PYTORCH_IMAGE}
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    TOKENIZERS_PARALLELISM=false \
+    HF_HOME=/workspace/.cache/huggingface \
+    TORCH_EXTENSIONS_DIR=/workspace/.cache/torch_extensions
+
+WORKDIR /workspace/ispras
+
+COPY requirements-simpo.txt /tmp/requirements-simpo.txt
+
+# NGC images set /etc/pip/constraint.txt. The specialized training image replaces
+# conflicting Python packages while keeping the NGC-provided torch/CUDA stack intact.
+RUN PIP_CONSTRAINT= python -m pip install --upgrade pip setuptools wheel \
+    && PIP_CONSTRAINT= python -m pip install -r /tmp/requirements-simpo.txt \
+    && python -m pip check \
+    && python -c "from trl import CPOConfig, CPOTrainer; import bitsandbytes, flash_attn, peft, transformers; print('SimPO stack OK, flash-attn', flash_attn.__version__)"
+
+CMD ["bash"]

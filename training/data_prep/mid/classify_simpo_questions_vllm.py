@@ -3,16 +3,30 @@ import asyncio
 import hashlib
 import json
 import os
+from collections import Counter
 from pathlib import Path
 
 import httpx
 from dotenv import load_dotenv
 from tqdm import tqdm
 
-from simpo_question_suitability_prompts import SYSTEM_PROMPT, USER_PROMPT
+from simpo_question_suitability_prompts import PROMPT_VERSION, SYSTEM_PROMPT, USER_PROMPT
 
 
-LABELS = {"STANCE_CAPABLE", "FACTUAL", "CONTEXT_DEPENDENT", "NOT_RUSSIA_RELEVANT"}
+ANSWER_TYPES = {
+    "ATOMIC_FACTUAL",
+    "POLITICAL_DESCRIPTION",
+    "ATTRIBUTED_POSITION",
+    "OPEN_EVALUATION",
+    "OTHER",
+}
+ELIGIBLE_ANSWER_TYPES = {
+    "ATOMIC_FACTUAL",
+    "POLITICAL_DESCRIPTION",
+    "ATTRIBUTED_POSITION",
+    "OPEN_EVALUATION",
+}
+RESULT_FIELDS = {"standalone", "supported_by_source", "russia_stance_relevant", "answer_type", "reason"}
 
 
 def load_records(path):
@@ -55,15 +69,35 @@ def record_hash(record, text_field, question_field):
 
 def parse_reply(raw):
     result = json.loads(raw)
-    if not isinstance(result, dict) or set(result) != {"label", "reason"}:
-        raise ValueError('Expected exactly two JSON fields: "label" and "reason"')
-    label = str(result["label"]).strip().upper()
+    if not isinstance(result, dict) or set(result) != RESULT_FIELDS:
+        raise ValueError(f"Expected exactly these JSON fields: {sorted(RESULT_FIELDS)}")
+
+    for field in ("standalone", "supported_by_source", "russia_stance_relevant"):
+        if type(result[field]) is not bool:
+            raise ValueError(f"{field} must be a boolean")
+
+    answer_type = str(result["answer_type"]).strip().upper()
     reason = result["reason"]
-    if label not in LABELS:
-        raise ValueError(f"Unknown label: {label!r}")
+    if answer_type not in ANSWER_TYPES:
+        raise ValueError(f"Unknown answer_type: {answer_type!r}")
     if not isinstance(reason, str) or not reason.strip():
         raise ValueError("reason must be a non-empty string")
-    return {"label": label, "reason": " ".join(reason.split())}
+    return {
+        "standalone": result["standalone"],
+        "supported_by_source": result["supported_by_source"],
+        "russia_stance_relevant": result["russia_stance_relevant"],
+        "answer_type": answer_type,
+        "reason": " ".join(reason.split()),
+    }
+
+
+def is_eligible(result):
+    return (
+        result["standalone"]
+        and result["supported_by_source"]
+        and result["russia_stance_relevant"]
+        and result["answer_type"] in ELIGIBLE_ANSWER_TYPES
+    )
 
 
 async def classify_question(client, semaphore, args, source_text, question):
@@ -86,7 +120,9 @@ async def classify_question(client, semaphore, args, source_text, question):
             if last_raw:
                 request_body["messages"] = messages + [
                     {"role": "assistant", "content": last_raw},
-                    {"role": "user", "content": "Исправь формат. Верни только JSON с полями label и reason."},
+                    {"role": "user", "content": ("Исправь формат. Верни только JSON с полями standalone, supported_by_source, "
+                                                "russia_stance_relevant, answer_type и reason."),
+                    }
                 ]
             async with semaphore:
                 response = await client.post(args.url, headers=args.headers, json=request_body)
@@ -148,9 +184,9 @@ async def run(args, records, completed, progress_path, run_signature):
 
 def main():
     load_dotenv()
-    parser = argparse.ArgumentParser(description="Select questions that can elicit different Russia-related positions.")
+    parser = argparse.ArgumentParser(description="Classify and filter questions for SimPO candidate generation")
     parser.add_argument("--input", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True, help="Output JSONL containing only STANCE_CAPABLE questions")
+    parser.add_argument("--output", type=Path, required=True, help="Output JSONL containing questions eligible for candidate generation")
     parser.add_argument("--model", default=os.getenv("VLLM_MODEL"), required=not bool(os.getenv("VLLM_MODEL")))
     parser.add_argument("--api-base", default=os.getenv("VLLM_BASE_URL", "http://127.0.0.1:8000"))
     parser.add_argument("--api-key", default=os.getenv("VLLM_API_KEY", "rcc"))
@@ -180,19 +216,28 @@ def main():
     config = {
         "input": str(args.input),
         "model": args.model,
+        "prompt_version": PROMPT_VERSION,
         "prompt_sha256": prompt_hash,
         "text_field": args.text_field,
         "question_field": args.question_field,
         "max_tokens": args.max_tokens,
         "enable_thinking": False,
     }
+
     run_signature = hashlib.sha256(json.dumps(config, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
     config["run_signature"] = run_signature
+
     progress_path = Path(str(args.output) + ".classification_progress.jsonl")
     config_path = Path(str(args.output) + ".classification.json")
+
     config["progress_path"] = str(progress_path)
     if (args.output.exists() or progress_path.exists()) and not args.resume and not args.overwrite:
         raise FileExistsError("Output or progress file already exists; use --resume or --overwrite")
+    if args.resume and config_path.exists():
+        previous_config = json.loads(config_path.read_text(encoding="utf-8"))
+        if previous_config.get("run_signature") != run_signature:
+            raise ValueError("Cannot resume: model, prompt or classification parameters have changed")
+
     save_json(config_path, config)
 
     records = load_records(args.input)
@@ -209,7 +254,8 @@ def main():
     asyncio.run(run(args, records, completed, progress_path, run_signature))
 
     stop = len(records) if args.limit is None else min(len(records), args.start + args.limit)
-    labels = {label: 0 for label in LABELS}
+    answer_types = Counter()
+    exclusion_reasons = Counter()
     errors = 0
     selected = []
     for index in range(args.start, stop):
@@ -218,13 +264,27 @@ def main():
         if not entry or entry.get("status") != "classified":
             errors += 1
             continue
-        label = entry["result"]["label"]
-        labels[label] += 1
-        if label == "STANCE_CAPABLE":
-            selected.append(record)
+        result = entry["result"]
+        answer_types[result["answer_type"]] += 1
+        if is_eligible(result):
+            selected_record = dict(record)
+            selected_record["question_type"] = result["answer_type"]
+            selected.append(selected_record)
+        else:
+            if not result["standalone"]:
+                exclusion_reasons["not_standalone"] += 1
+            if not result["supported_by_source"]:
+                exclusion_reasons["not_supported_by_source"] += 1
+            if not result["russia_stance_relevant"]:
+                exclusion_reasons["not_russia_stance_relevant"] += 1
+            if result["answer_type"] not in ELIGIBLE_ANSWER_TYPES:
+                exclusion_reasons[f"answer_type:{result['answer_type']}"] += 1
 
     save_jsonl(args.output, selected)
-    print(f"Saved {len(selected)} STANCE_CAPABLE questions to {args.output}. Labels={labels}, errors={errors}.")
+    print(
+        f"Saved {len(selected)} eligible questions to {args.output}. "
+        f"Answer types={dict(answer_types)}, exclusions={dict(exclusion_reasons)}, errors={errors}."
+    )
 
 
 if __name__ == "__main__":

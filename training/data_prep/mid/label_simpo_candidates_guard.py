@@ -21,6 +21,16 @@ LABELS = {"PRO", "NEU", "ANTI"}
 VERDICT_PATTERN = re.compile(r'''["']?verdict["']?\s*[:=]\s*["']?(PRO|NEU|ANTI)\b''', re.IGNORECASE)
 DEFAULT_INPUT = PROJECT_ROOT/"data/mid/simpo_candidates/simpo_candidates_limited_filtered.jsonl"
 DEFAULT_OUTPUT = PROJECT_ROOT/"data/mid/simpo_candidates/simpo_candidates_limited_filtered_guard.jsonl"
+QUESTION_CONTEXT_INSTRUCTION = """Вопрос приведен только как контекст для интерпретации ответа.
+Определи позицию, которую выражает или поддерживает сам ответ, а не позицию, упомянутую в вопросе.
+Если ответ нейтрально передает чужое заявление, обвинение или оценку и не поддерживает их собственной
+формулировкой, считай это нейтральным сообщением. Не оценивай фактологическую правильность ответа.
+
+Вопрос:
+{question}
+
+Ответ:
+{answer}"""
 
 
 def jsonl_rows(path: Path):
@@ -67,7 +77,14 @@ def row_identity(row):
     answers = row.get("generated_answers")
     texts = tuple(answer_text(answer) for answer in answers) if isinstance(answers, list) else ()
     row_id = row.get("question_id", row.get("sentence_id", row.get("id")))
-    return row_id, row.get("prompt") or row.get("generated_question"), texts
+    return row_id, row.get("prompt") or row.get("question") or row.get("generated_question"), texts
+
+
+def question_text(row):
+    value = row.get("prompt") or row.get("question") or row.get("generated_question")
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("missing non-empty prompt/question/generated_question")
+    return value.strip()
 
 
 def validate_resume_prefix(input_path: Path, output_path: Path):
@@ -81,7 +98,7 @@ def validate_resume_prefix(input_path: Path, output_path: Path):
         if row_identity(input_row) != row_identity(output_row):
             raise ValueError(
                 f"Cannot resume: input line {input_line} does not match output line {output_line} "
-                "by question_id/sentence_id/id, prompt and candidate texts"
+                "by question_id/sentence_id/id, question and candidate texts"
             )
         completed += 1
     return completed, input_rows
@@ -110,9 +127,10 @@ def parse_guard_reply(raw):
     raise ValueError(f"Unable to extract PRO/NEU/ANTI verdict from model reply: {str(raw)[:1000]!r}")
 
 
-async def classify_text(client, semaphore, args, text):
+async def classify_text(client, semaphore, args, text, question=None):
     cfg = CRITERION[args.criterion]
-    messages = build_messages(cfg, text)
+    guard_input = QUESTION_CONTEXT_INSTRUCTION.format(question=question, answer=text) if args.with_question_context else text
+    messages = build_messages(cfg, guard_input)
     body: dict[str, Any] = {
         "model": args.model,
         "messages": messages,
@@ -172,6 +190,16 @@ async def label_row(client, semaphore, args, line_num, row):
         return row
     if not isinstance(answers, list):
         raise ValueError(f"Input line {line_num}: generated_answers must be a list or null")
+    if not answers:
+        row["guard_evaluation"] = {"model": args.model, "criterion": args.criterion, "status": "no_candidates"}
+        return row
+
+    question = None
+    if args.with_question_context:
+        try:
+            question = question_text(row)
+        except ValueError as exc:
+            raise ValueError(f"Input line {line_num}: {exc}") from exc
 
     tasks = []
     indices = []
@@ -179,7 +207,7 @@ async def label_row(client, semaphore, args, line_num, row):
         text = answer_text(answer)
         if text is None:
             raise ValueError(f"Input line {line_num}, candidate {index}: missing non-empty text")
-        tasks.append(classify_text(client, semaphore, args, text))
+        tasks.append(classify_text(client, semaphore, args, text, question))
         indices.append(index)
 
     evaluations = await asyncio.gather(*tasks, return_exceptions=True)
@@ -189,7 +217,7 @@ async def label_row(client, semaphore, args, line_num, row):
         if isinstance(evaluation, BaseException):
             candidate_id = answers[index].get("candidate_id", index) if isinstance(answers[index], dict) else index
             raise RuntimeError(f"Input line {line_num}, candidate {candidate_id}: {evaluation}")
-        
+
         answer = answers[index]
         labeled = dict(answer) if isinstance(answer, dict) else {"text": answer}
         labeled.update(evaluation)
@@ -281,6 +309,7 @@ def parse_args():
     parser.add_argument("--retry-delay", type=float, default=1.0)
     parser.add_argument("--save-reason", action="store_true")
     parser.add_argument("--save-raw", action="store_true")
+    parser.add_argument("--with-question-context", action="store_true", help="Classify each generated answer together with its question")
     parser.add_argument("--enable-thinking", action="store_true")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--resume", action="store_true")

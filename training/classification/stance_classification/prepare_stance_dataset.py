@@ -157,7 +157,7 @@ def main(input_path, output_dir, test_path, test_size: float = 0.1, random_seed:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", type=str, default="/Users/kaengreg/Documents/Работа /НИВЦ/ispras/countries_15_01_full_filtered.json")
+    parser.add_argument("--input", type=str, default="countries_15_01_full_filtered.json")
     parser.add_argument("--output_dir", type=str, default="data/countries_classification/")
     parser.add_argument("--test_size", type=float, default=0.1, help="Fraction of data to use for test split. Set to 0 to disable test partition.")
     parser.add_argument("--seed", type=int, default=42)

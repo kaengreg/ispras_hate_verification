@@ -1,0 +1,61 @@
+{
+  "model_name": "RefalMachine/RuadaptQwen3-4B-Instruct",
+  "train_data": [
+    "data/anti_russia_criteria/guard_train/splits/multitask/train_chat.jsonl",
+    {
+      "path": "data/toxicity_criteria/sft_prepared/final_shuff/train_chat.jsonl",
+      "max_examples": 15000
+    },
+    "data/toxicity_criteria/sft_prepared/hard/train_chat.jsonl",
+    "data/toxicity_criteria/sft_prepared/national_targeted/train_chat.jsonl"
+  ],
+  "val_data": [
+    "data/anti_russia_criteria/guard_train/splits/multitask/val_chat.jsonl",
+    "data/toxicity_criteria/sft_prepared/national_targeted/val_chat.jsonl",
+    "data/toxicity_criteria/sft_prepared/hard/val_chat.jsonl",
+    {
+      "path": "data/toxicity_criteria/sft_prepared/final_shuff/train_val.jsonl",
+      "max_examples": 15000
+    }
+  ],
+  "output_dir": "RuadaptQwen3-4B-Instruct_multitask_stance+tox_lora",
+  "max_seq_length": 4096,
+  "flash_attn": true,
+  "group_by_length": true,
+  "trainer": {
+    "per_device_train_batch_size": 4,
+    "per_device_eval_batch_size": 4,
+    "gradient_accumulation_steps": 4,
+    "num_train_epochs": 2,
+    "learning_rate": 2e-4,
+    "warmup_ratio": 0.01,
+    "logging_steps": 50,
+    "eval_strategy": "steps",
+    "eval_steps": 500,
+    "save_strategy": "steps",
+    "save_steps": 1000,
+    "bf16": true,
+    "fp16": false,
+    "seed": 1337,
+    "data_seed": 1337,
+    "logging_dir": "RuadaptQwen3-4B-Instruct_multitask_stance+tox_lora/logs",
+    "gradient_checkpointing": false,
+    "ddp_find_unused_parameters": false,
+    "deepspeed": null,
+    "report_to": "tensorboard"
+  },
+  "lora": {
+    "r": 32,
+    "lora_alpha": 64,
+    "lora_dropout": 0.05,
+    "target_modules": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj",
+      "gate_proj",
+      "up_proj",
+      "down_proj"
+    ]
+  }
+}
