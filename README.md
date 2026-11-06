@@ -2,6 +2,18 @@
 
 This repository contains the code for a Language Model (LLM) Stand, built with FastAPI and Gradio, designed for analyzing text to determine the presence of hate speech.
 
+## Repository branches
+
+| Branch | Contents |
+| --- | --- |
+| [main](https://github.com/kaengreg/ispras_hate_verification/tree/main) | Main application version and repository entry point. |
+| [wip](https://github.com/kaengreg/ispras_hate_verification/tree/wip) | Updated moderation application, criteria, prompts, and evaluation scripts. |
+| [training](https://github.com/kaengreg/ispras_hate_verification/tree/training) | SFT and SimPO training, dataset preparation, configurations, and launch scripts. |
+| [provocative_bench](https://github.com/kaengreg/ispras_hate_verification/tree/provocative_bench) | Provocative question generation, paraphrasing, answer generation, and Slurm launch scripts. Based on `wip`. |
+
+Switch to the relevant branch before following its scripts and configurations.
+Model weights and datasets are backed up separately in S3; access details are shared with the team separately.
+
 ## Overview
 The project utilizes advanced language models to provide an automated and efficient solution for hate speech detection. It is intended for research, content moderation, and other applications promoting safe and inclusive online communication.
 
