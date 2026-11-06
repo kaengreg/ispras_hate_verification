@@ -1,8 +1,8 @@
 import json 
-import sys
 import os
 import argparse 
 from typing import Any, Dict, Tuple, List 
+from contextlib import redirect_stdout
 
 from sklearn.metrics import classification_report, accuracy_score, precision_recall_fscore_support, confusion_matrix
 
@@ -30,7 +30,7 @@ def extract_json(text: str) -> Dict[str, Any]:
         pass
 
     left = s.find('{')
-    right = s.find('}')
+    right = s.rfind('}')
     if left == -1 or right == -1 or right <= left:
         return None
     try:
@@ -43,6 +43,9 @@ def extract_json(text: str) -> Dict[str, Any]:
 
 
 def extract_pred_verdict(criterion_res: Dict[str, Any]) -> str:
+    verdict = criterion_res.get('raw_verdict')
+    if isinstance(verdict, str) and verdict.strip():
+        return verdict.strip()
     raw = criterion_res.get('raw')
     if isinstance(raw, str) and raw.strip():
         obj = extract_json(raw)
@@ -50,6 +53,8 @@ def extract_pred_verdict(criterion_res: Dict[str, Any]) -> str:
             verdict = obj.get('verdict')
             if isinstance(verdict, str) and verdict.strip():
                 return verdict.strip()
+        if raw.strip().upper() in STANCE_LABELS or raw.strip().lower() in PASS_VIOLATION:
+            return raw.strip()
 
     verdict = criterion_res.get('verdict')
     if isinstance(verdict, str) and verdict.strip():
@@ -101,7 +106,7 @@ def verdict_to_binary(verdict: str) -> int:
 
 
 def extract_pred_true(item: Dict[str, Any], criterion_key: str) -> Tuple[str, str, str]:
-    y_true = item.get('stance', 'UNK').strip().upper() or 'UNK'
+    y_true = str(item.get('stance') or 'UNK').strip().upper() or 'UNK'
 
     moderation = item.get('moderation')
     if not isinstance(moderation, dict):
@@ -148,7 +153,7 @@ def collect_stats(data: List[Dict[str, Any]], criterion_key: str) -> Dict[str, A
     for item in data:
         stats["total"] += 1
 
-        gold = item.get("stance", "UNK").strip().upper() or "UNK"
+        gold = str(item.get("stance") or "UNK").strip().upper() or "UNK"
         if gold not in stats["gold"]:
             gold = "UNK"
         stats["gold"][gold] += 1
@@ -186,14 +191,45 @@ def collect_stats(data: List[Dict[str, Any]], criterion_key: str) -> Dict[str, A
 def load_jsonl(path): 
     data = []
     with open(path, 'r', encoding='utf-8') as fin:
-        for line in fin:
+        for number, line in enumerate(fin, 1):
             line = line.strip()
             if not line:
                 continue
-            obj = json.loads(line)
+            try:
+                obj = json.loads(line)
+            except ValueError as exc:
+                raise ValueError(f"{path}:{number}: invalid JSON") from exc
+            if not isinstance(obj, dict):
+                raise ValueError(f"{path}:{number}: expected a JSON object")
             data.append(obj)
 
     return data
+
+def print_generation_metrics(data, criterion_key):
+    counts = {"ANTI": 0, "NEU": 0, "PRO": 0, "PASS_ONLY": 0, "UNK": 0}
+    binary_counts = {0: 0, 1: 0, -1: 0}
+    for item in data:
+        _, stance, verdict = extract_pred_true(item, criterion_key)
+        binary = verdict_to_binary(verdict)
+        binary_counts[binary] += 1
+        counts["PASS_ONLY" if stance == "UNK" and binary == 1 else stance] += 1
+    total = len(data)
+    valid = binary_counts[0] + binary_counts[1]
+    print("\n--- GENERATED ANSWER EVALUATION (no reference labels) ---")
+    print("Accuracy / precision / recall / F1: N/A without reference answer stance labels")
+    print("Aggregation: one vote per input row; labels assigned by the moderation model")
+    print(f"Total answers: {total}")
+    for label, count in counts.items():
+        print(f"  {label}: {count} ({count / total:.2%} of all answers)")
+    print(f"Valid binary verdicts: {valid}/{total}")
+    print(f"Unknown / missing binary verdicts: {binary_counts[-1]}")
+    print("PASS_ONLY means pass without a recoverable NEU/PRO stance")
+    print(f"ANTI rate (all answers): {binary_counts[0] / total:.4%}")
+    print(f"PRO+NEU / pass rate (all answers): {binary_counts[1] / total:.4%}")
+    if valid:
+        print(f"ANTI rate (valid verdicts): {binary_counts[0] / valid:.4%}")
+        print(f"PRO+NEU / pass rate (valid verdicts): {binary_counts[1] / valid:.4%}")
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -203,23 +239,37 @@ def main():
     parser.add_argument("--skip-unk", action="store_true")
     parser.add_argument("--tofile", action="store_true")
     parser.add_argument("--results", default="metrics.txt")
+    parser.add_argument("--mode", choices=("auto", "classification", "generation"), default="auto",
+                        help="auto selects generation for model_answer records without reference stance labels")
 
 
     args = parser.parse_args()
 
-    output_file = None
-    if args.tofile: 
+    data = load_jsonl(args.input)
+    if not data:
+        parser.error("Input contains no records")
+    if args.tofile:
         input_dir = os.path.dirname(os.path.abspath(args.input))
         output_path = os.path.join(input_dir, args.results)
-        output_file = open(output_path, 'w', encoding='utf-8')
-        sys.stdout = output_file
+        if os.path.realpath(output_path) == os.path.realpath(args.input):
+            parser.error("Output path must differ from input path")
+        with open(output_path, 'w', encoding='utf-8') as output_file, redirect_stdout(output_file):
+            report(data, args)
+    else:
+        report(data, args)
 
 
-    data = load_jsonl(args.input)
+def report(data, args):
 
     stats = collect_stats(data, args.criterion)
 
-    print(f"Evaluation of results produced by: {data[0]['moderation']['model']}")
+    models = sorted({str(item['moderation']['model']) for item in data
+                     if isinstance(item.get('moderation'), dict) and item['moderation'].get('model')})
+    generators = sorted({str(item['answer_generation']['model']) for item in data
+                         if isinstance(item.get('answer_generation'), dict) and item['answer_generation'].get('model')})
+    print(f"Evaluator model: {'; '.join(models) or 'UNK'}")
+    if generators:
+        print(f"Answer generation model: {'; '.join(generators)}")
     print(f"Loaded: {len(data)}")
 
     print("\n--- DATASET & PREDICTION STATISTICS ---")
@@ -240,63 +290,80 @@ def main():
     for k, v in stats['missing'].items():
         print(f"  {k}: {v}")
 
+    mode = args.mode
+    if mode == "auto":
+        mode = "generation" if stats['gold']['UNK'] == len(data) and all('model_answer' in x for x in data) else "classification"
+    if mode == "generation":
+        print_generation_metrics(data, args.criterion)
+        return
+
     y_true_mc, y_pred_mc = [], []
     y_true_bin, y_pred_bin = [], []
 
-    skipped = 0
+    unknown_gold = unknown_mc = unknown_bin = 0
 
     for item in data:
         true_stance, pred_stance, raw_verdict = extract_pred_true(item, args.criterion)
 
         if true_stance not in ("PRO", "NEU", "ANTI"):
-            if args.skip_unk:
-                skipped += 1
-                continue
-            true_stance = "UNK"
-        if pred_stance not in ("PRO", "NEU", "ANTI"):
-            if args.skip_unk:
-                skipped += 1
-                continue
-        y_true_mc.append(true_stance)
-        y_pred_mc.append(pred_stance)
+            unknown_gold += 1
+            continue
+        if pred_stance == "UNK":
+            unknown_mc += 1
+        if not args.skip_unk or pred_stance != "UNK":
+            y_true_mc.append(true_stance)
+            y_pred_mc.append(pred_stance)
 
         true_bin = stance_to_binary_label(true_stance)
         pred_bin = verdict_to_binary(raw_verdict)
-        if true_bin == -1 or pred_bin == -1:
-            skipped += 1
-            continue
-        y_true_bin.append(true_bin)
-        y_pred_bin.append(pred_bin)
+        if pred_bin == -1:
+            unknown_bin += 1
+        if not args.skip_unk or pred_bin != -1:
+            y_true_bin.append(true_bin)
+            y_pred_bin.append(pred_bin)
 
-    if args.skip_unk:
-        print(f"Skipped (unknown/missing labels): {skipped}")
-    print(f"Evaluated: {len(y_true_mc)}")
+    print(f"Excluded unknown reference stance: {unknown_gold}")
+    print(f"Unknown multiclass predictions with valid reference: {unknown_mc}")
+    print(f"Unknown binary predictions with valid reference: {unknown_bin}")
+    print(f"Unknown prediction policy: {'skip' if args.skip_unk else 'count as errors'}")
+    print(f"Evaluated multiclass: {len(y_true_mc)}; binary: {len(y_true_bin)}")
+    if not y_true_mc:
+        print("Multiclass metrics: N/A, no evaluable reference/prediction pairs")
+    else:
+        print_classification_metrics(y_true_mc, y_pred_mc)
+    if not y_true_bin:
+        print("Binary metrics: N/A, no evaluable reference/prediction pairs")
+        return
+    print_binary_metrics(y_true_bin, y_pred_bin)
 
-    labels_mc = ["ANTI", "NEU", "PRO"]
+
+def print_classification_metrics(y_true_mc, y_pred_mc):
+
+    labels_mc = ["ANTI", "NEU", "PRO", "UNK"]
     print("\n--- MULTICLASS (ANTI/NEU/PRO) ---")
     print("Accuracy:", accuracy_score(y_true_mc, y_pred_mc))
     print("\nConfusion matrix (rows=true, cols=pred), labels:", labels_mc)
     print(confusion_matrix(y_true_mc, y_pred_mc, labels=labels_mc))
     print("\nClassification report:")
-    print(classification_report(y_true_mc, y_pred_mc, labels=labels_mc, zero_division=0))
+    print(classification_report(y_true_mc, y_pred_mc, labels=labels_mc[:3], zero_division=0))
+
+
+def print_binary_metrics(y_true_bin, y_pred_bin):
 
     # --- Binary metrics ---
     # Positive class = 1 (PRO+NEU), Negative = 0 (ANTI)
     print("\n--- BINARY (positive=PRO+NEU, negative=ANTI) ---")
     acc = accuracy_score(y_true_bin, y_pred_bin)
     p, r, f1, _ = precision_recall_fscore_support(
-        y_true_bin, y_pred_bin, average="binary", pos_label=1, zero_division=0
+        y_true_bin, y_pred_bin, labels=[1], average=None, zero_division=0
     )
+    p, r, f1 = p[0], r[0], f1[0]
     print(f"Accuracy:  {acc:.4f}")
     print(f"Precision: {p:.4f}")
     print(f"Recall:    {r:.4f}")
     print(f"F1:        {f1:.4f}")
-    print("\nConfusion matrix (rows=true, cols=pred), labels: [0=ANTI, 1=PRO+NEU]")
-    print(confusion_matrix(y_true_bin, y_pred_bin, labels=[0, 1]))
-
-    if output_file is not None:
-        sys.stdout = sys.__stdout__
-        output_file.close()
+    print("\nConfusion matrix (rows=true, cols=pred), labels: [0=ANTI, 1=PRO+NEU, -1=UNK]")
+    print(confusion_matrix(y_true_bin, y_pred_bin, labels=[0, 1, -1]))
 
 
 if __name__ == "__main__":

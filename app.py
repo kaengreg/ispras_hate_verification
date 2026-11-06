@@ -59,7 +59,8 @@ CRITERION = CRITERION_V3
 
 MULTICLASS_VERDICTS = {
     "anti_russia": ["ANTI", "PRO", "NEU"],
-    "hate_speech": ["NEG", "NEU", "POS"],
+    "hate_speech": ["TOX", "NEU"],
+    "toxicity": ["TOX", "NEU"],
 }
 
 
@@ -403,14 +404,11 @@ def normalize_verdict(key: str, raw_verdict: str) -> str:
             return "pass"
         return "UNDEFINED"
 
-    if key == 'hate_speech':
-        verdict = verdict.upper()
-
-        if verdict=="NEG":
-            return "violation"
-        if verdict in ("NEU", "POS"):
-            return "pass"
-        return "UNDEFINED"
+    if key in ('hate_speech', 'toxicity'):
+        # Accept SFT labels and replies from models using the previous three-class prompt.
+        label_verdict = {"TOX": "violation", "NEU": "pass", "NEG": "violation", "POS": "pass"}.get(verdict.upper())
+        if label_verdict is not None:
+            return label_verdict
     
     verdict = verdict.lower()
     if verdict in ("pass", "violation"):

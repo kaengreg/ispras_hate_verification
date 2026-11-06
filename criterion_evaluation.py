@@ -84,7 +84,7 @@ async def list_criteria():
     for criteria in criterias:
         print(f" - {criteria['key']} ({criteria['title']})")
     
-async def process_file(in_path, out_path, model, criteria, concurrency=5, warmup=0, stats_out=None, include_timing=False, hardware=None, max_retries=1):
+async def process_file(in_path, out_path, model, criteria, concurrency=5, warmup=0, stats_out=None, include_timing=False, hardware=None, max_retries=1, text_field="text"):
 
     out_dir = os.path.dirname(out_path)
     if out_dir:
@@ -111,11 +111,11 @@ async def process_file(in_path, out_path, model, criteria, concurrency=5, warmup
 
     async def process_one(item):
         nonlocal invalid_items
-        text = item.get("text")
+        text = item.get(text_field)
 
         if not isinstance(text, str) or not text.strip():
             invalid_items += 1
-            await queue.put({**item, "error": "Item is either empty or missing 'text' field"})
+            await queue.put({**item, "error": f"Item is either empty or missing '{text_field}' field"})
             return
 
         request = RunRequest(model=model, text=text, criteria=criteria, max_retries=max_retries)
@@ -152,7 +152,7 @@ async def process_file(in_path, out_path, model, criteria, concurrency=5, warmup
 
             pbar.close()
 
-    valid_items = [item for item in data if isinstance(item.get("text"), str) and item["text"].strip()]
+    valid_items = [item for item in data if isinstance(item.get(text_field), str) and item[text_field].strip()]
     available_criteria = [item["key"] for item in (await get_criteria())["criteria"]]
     unknown_criteria = set(criteria or []) - set(available_criteria)
     if unknown_criteria:
@@ -160,7 +160,7 @@ async def process_file(in_path, out_path, model, criteria, concurrency=5, warmup
     effective_criteria = available_criteria if not criteria else [key for key in available_criteria if key in set(criteria)]
     if warmup and valid_items:
         print(f"Warming up model with {warmup} request(s)...")
-        warmup_request = RunRequest(model=model, text=valid_items[0]["text"], criteria=criteria, max_retries=max_retries)
+        warmup_request = RunRequest(model=model, text=valid_items[0][text_field], criteria=criteria, max_retries=max_retries)
         for _ in range(warmup):
             await run(warmup_request)
 
@@ -198,7 +198,7 @@ async def process_file(in_path, out_path, model, criteria, concurrency=5, warmup
         "throughput_criterion_evaluations_per_second": len(successful_durations) * len(effective_criteria) / measurement_time if measurement_time else 0,
         "latency_seconds": latency_summary(successful_durations),
         "failed_request_latency_seconds": latency_summary(failed_durations),
-        "input_characters": latency_summary([len(item["text"]) for item in valid_items])
+        "input_characters": latency_summary([len(item[text_field]) for item in valid_items])
     }
 
     if stats_out is None:
@@ -220,6 +220,7 @@ async def main():
     parser.add_argument("-i", "--input")
     parser.add_argument("-o", "--output", default=None)
     parser.add_argument("--model")
+    parser.add_argument("--text-field", default="text", help="Input field containing the text to evaluate (default: text).")
     parser.add_argument("--criteria", nargs="*", default=None)
     parser.add_argument('--concurrency', type=int, default=5)
     parser.add_argument("--warmup", type=int, default=0, help="Number of unmeasured warm-up requests.")
@@ -258,6 +259,7 @@ async def main():
 
     await process_file(
         in_path=args.input,
+        text_field=args.text_field,
         out_path=args.output,
         model=args.model,
         criteria=args.criteria,
